@@ -1,19 +1,19 @@
 # TIPA (Temporal IPA) File Format Specification
 
 - **Version**: 1.0 (draft)
-- **Author**: Benoit Pereira da Silva 
+- **Author**: Benoit Pereira da Silva
 - **Date**: 28/11/2025
 
 ---
 
 ## 1. Purpose and scope
 
-TIPA (Temporal IPA) is a plain-text format that combines:
+TIPA (Temporal IPA) is a plain‑text format that combines:
 
 - **International Phonetic Alphabet (IPA)** transcriptions
 - **Temporal anchors** (timestamps in seconds)
 - **Multiple speaker / role attribution**
-- **Inline annotations** (e.g. stage directions or prosodic marks)
+- **Inline annotations** (e.g. stage directions or prosodic notes)
 - **Inline comments**
 
 TIPA files are designed to be:
@@ -25,10 +25,22 @@ TIPA files are designed to be:
 This document defines:
 
 - The **syntax** of TIPA files
-- The **semantics** of roles, anchors, pauses, annotations, and escaping
-- The **“Strict TIPA” profile** (called *Strict IPA* in some tools) for normalized output
+- The **semantics** of roles, anchors, pauses, annotations, and comments
+- The **“Strict TIPA” profile** (sometimes called *Strict IPA*) for normalized output
 
----
+### 1.1 Non‑intrusive semantics
+
+A central design requirement in TIPA v1.0 is:
+
+> **Inside IPA / extIPA fragments, TIPA must be invisible.**
+
+Concretely:
+
+- IPA and extIPA graphemes (including `\`, `|`, tone letters, diacritics, etc.) are always taken **literally** inside phonetic content.
+- There is **no escape character** inside utterance bodies.
+- TIPA syntax (roles, anchors, pauses, annotations, comments) lives **around** phonetic fragments, not inside them.
+
+    ---
 
 ## 2. File format basics
 
@@ -36,19 +48,19 @@ This document defines:
 
 - A TIPA file **must** be encoded in UTF‑8.
 - IPA symbols are written using Unicode code points.
-- Both **standard IPA** and **extended IPA** (extIPA, tone letters, prosodic symbols, extra diacritics, combining marks, etc.) may be used freely.  
-  They behave like any other IPA glyph and **do not require special escaping** unless they are literally the characters `[`, `]`, or `\`.
+- Both **standard IPA** and **extended IPA** (extIPA, tone letters, prosodic symbols, extra diacritics, combining marks, etc.) may be used freely in phonetic fragments.
+- The companion document [references.md](references.md) enumerates the graphemes used by TIPA‑aware tools.
 
 ### 2.2 Lines and line breaks
 
 - A TIPA document is a sequence of **lines** separated by `LF` (`\n`), `CRLF` (`\r\n`), or `CR` (`\r`).
 - Leading and trailing whitespace on a line is ignored **except** inside:
-  - IPA fragments
-  - Annotations (`[...]`)
+    - IPA fragments
+    - Annotations (`[...]`)
 
 ### 2.3 Line types
 
-Every non-empty, non-whitespace line is exactly one of:
+Every non‑empty, non‑whitespace line is exactly one of:
 
 1. **Comment line**
 2. **Role declaration line**
@@ -62,7 +74,7 @@ Every non-empty, non-whitespace line is exactly one of:
 
 Comments are introduced with `#` or `##` followed by a space.
 
-- A **whole-line comment** is a line whose first non-whitespace characters are:
+- A **whole‑line comment** is a line whose first non‑whitespace characters are:
 
   ```text
   # <space>...
@@ -72,32 +84,37 @@ Comments are introduced with `#` or `##` followed by a space.
 - An **inline comment** can appear after an utterance on the same line:
 
   ```text
-  @benoit: 156.000 bõʒuɾ ma bɛlə! 156.800  # inline comment
-  @charlotte: 157.097 bõʒuɾ [en souriant] 157.600  ## stronger comment
+  @benoit: 156.000 | bõʒuɾ ma bɛlə! | 156.800  # inline comment
+  @charlotte: 157.097 | bõʒuɾ [en souriant] | 157.600  ## stronger comment
   ```
 
 Parsing rules:
 
 - The first `#` that:
-  - is **not** inside an annotation (`[...]`), and
-  - is either the first non-whitespace character on the line, **or** is preceded by whitespace,
-  - and is followed by a space (`# ` or `## `)
+    - is **not** inside an annotation (`[...]`), and
+    - is either the first non‑whitespace character on the line, **or** is preceded by whitespace,
+    - and is followed by a space (`# ` or `## `)
 
   starts a comment that runs to the end of the line.
 
 - Everything from that `#` (or `##`) to the line break is ignored by parsers.
 
-### 3.2 Slash `/` and pipe `|` inside IPA and annotations
+### 3.2 Pipe `|` inside IPA and annotations
 
-- The `/` and `|` characters **never** start comments in TIPA.
-- They have **no special meaning** in IPA fragments or annotations and **do not need to be escaped**.
-- Inside IPA and annotations, `/` and `|` are ordinary characters, just like any other IPA or Unicode symbol.
+- A single `|` only has structural meaning in two cases:
+    - Inside a pause token `||` between times (see §6.3), or
+    - As a **standalone token** near a time anchor, used as a visual delimiter (see §6.2.2).
+
+Inside IPA fragments and inside annotations:
+
+- `|` are ordinary characters and **never need to be escaped**.
+- TIPA does not assign them any special meaning in these contexts.
 
 ---
 
 ## 4. Roles
 
-TIPA supports multi‑role transcripts (e.g., speakers in a dialogue).
+TIPA supports multi‑role transcripts (e.g., different speakers in a dialogue).
 
 ### 4.1 Role names
 
@@ -127,7 +144,7 @@ A role may be declared anywhere in the file using:
 ```
 
 - `<roleId>`: name without spaces.
-- `<role definition>`: free text description (optional but recommended).
+- `<role definition>`: free‑text description (optional but recommended).
 
 Example:
 
@@ -149,28 +166,28 @@ An utterance line can be attributed to a role using:
 Example:
 
 ```text
-@benoit: 156.000 bõʒuɾ ma bɛlə! 156.800
-@charlotte: 157.097 bõʒuɾ [en souriant] 157.600 158.088 bø 158.120 nwa[trainant] 159.00
+@benoit: 156.000 | bõʒuɾ ma bɛlə! | 156.800
+@charlotte: 157.097 | bõʒuɾ [en souriant] | 157.600 158.088 | bø | 158.120 | nwa[trainant] | 159.000
 ```
 
 Rules:
 
 - Optional whitespace is allowed between the role name and the colon, and after the colon.
 - The **first colon `:`** after a role name is treated as the role/utterance separator.
-- Outside this role prefix, the colon `:` has no special meaning and can be used freely inside IPA fragments and annotations.
+- Outside this role prefix, the colon `:` has no special meaning and can be used freely.
 
 ### 4.4 Utterances without explicit role
 
 - An utterance line **may omit** any role prefix:
 
 ```text
-156.000 bõʒuɾ ma bɛlə! 156.800
+156.000 | bõʒuɾ ma bɛlə! | 156.800
 ```
 
 - For **Strict TIPA** (see §9), a linter must treat such lines as being attributed to a default role `@0` and rewrite them as:
 
 ```text
-@0: 156.000 bõʒuɾ ma bɛlə! 156.800
+@0: 156.000 | bõʒuɾ ma bɛlə! | 156.800
 ```
 
 - If any utterance uses role `@0`, a role declaration line **should** be added:
@@ -181,7 +198,7 @@ Rules:
 
 ---
 
-## 5. IPA fragments, annotations, and escaping
+## 5. IPA fragments, annotations, and characters
 
 ### 5.1 IPA fragments
 
@@ -191,161 +208,215 @@ An **IPA fragment** is the phonetic content between anchors and annotations, e.g
 bõʒuɾ ma bɛlə!
 bø
 nwa
+p\p\p
+ka|ta
 ```
 
-- IPA fragments may contain:
-  - IPA letters and diacritics
-  - Extended IPA (extIPA) symbols
-  - Combining marks, tone letters, arrows, prosodic symbols, etc.
-  - Spaces
-  - Other Unicode symbols that are not structural characters.
+IPA fragments may contain:
+
+- IPA letters (consonants and vowels)
+- IPA combining diacritics
+- IPA suprasegmentals and tone letters
+- extIPA letters, diacritics, and prosodic symbols
+- Spaces
+- Optional punctuation such as `!`, `?`, `,`, `;` etc., which tools may ignore or preserve as needed
+
+Crucially:
+
+- **No escaping is ever required or recognised inside IPA fragments.**
+- Characters like `/`, `|`, `\`, `:`, `@`, `#` are all taken **literally** in IPA fragments.
+- The only characters that **cannot** appear inside an IPA fragment are:
+    - `[` and `]` (reserved for annotations, see §5.2).
 
 ### 5.2 Annotations
 
-Annotations add arbitrary metadata inside an utterance and are written in square brackets:
+Annotations add arbitrary metadata and are written in square brackets:
 
 ```text
 [en souriant]
 [trainant]
 [very fast, F0 rising]
+[meta: use casual style]
 ```
 
 Rules:
 
 - Syntax: `[annotation text]`
 - Annotations may appear:
-  - Between words
-  - Between IPA fragments
-  - Adjacent to anchors
+    - Between words
+    - Between IPA fragments
+    - Adjacent to anchors and/or `|` delimiters
 
 Example:
 
 ```text
-@charlotte: 157.097 bõʒuɾ [en souriant] 157.600
+@charlotte: 157.097 | bõʒuɾ [en souriant] | 157.600
 ```
 
-This means:
+Semantics:
 
 - Between 157.097 s and 157.600 s, the IPA fragment `bõʒuɾ` is spoken.
-- The annotation `[en souriant]` describes how it is spoken (e.g., “smiling”).
+- `[en souriant]` describes how it is spoken (e.g. “smiling”).
 
-### 5.3 Escaping special characters
+Inside annotations:
 
-The TIPA escape character is the backslash `\`.
+- All characters are taken literally.
+- The only characters that **cannot** appear unescaped are:
+    - `]` (closes the annotation)
+    - A line break
 
-Inside **IPA fragments** and **annotations**, escaping is intentionally minimal:
+There is **no escape syntax**. If you need to represent a literal `]`, you must encode it indirectly (e.g. `⟧` or spelling “right bracket”).
 
-- The **only characters that need escaping** are:
-  - `[` and `]`  (annotation delimiters)
-  - `\`          (the escape character itself)
+### 5.3 No escape sequences
 
-All other characters – including `/`, `|`, `:`, `@`, `#`, and any standard or extended IPA symbol – are taken **literally** inside IPA fragments and annotations.
+TIPA v1.1 has **no escape character** in utterance bodies:
 
-#### 5.3.1 Escaping in IPA fragments
+- Backslash `\` is never an escape; it is just another character (typically extIPA).
+- Sequences like `\[`, `\]`, `\\`, `\|`, `\/` have **no special meaning**.
 
-Inside IPA fragments:
+Consequences:
 
-- `\[` → literal `[`
-- `\]` → literal `]`
-- `\\` → literal `\`
+- You are free to write extIPA stutter notation:
 
-Examples:
+  ```text
+  p\p\p
+  ```
 
-```text
-bɛlə \[emphasis\]          # literal [emphasis]
-pa:se                      # colon is literal, no escaping
-tʃaɪ̈/ʃɜːt|test            # / and | are literal IPA/text
-```
-
-#### 5.3.2 Escaping in annotations
-
-Inside annotations `[ ... ]`:
-
-- The annotation text can contain **any characters** except:
-  - an unescaped `[` or `]` (which would conflict with delimiters), and
-  - a bare line break.
-
-To write literal brackets or backslashes:
-
-- `\[` → literal `[`
-- `\]` → literal `]`
-- `\\` → literal `\`
-
-Example:
-
-```text
-[prosody: \[focus\] on last syllable]
-[note: literal \[ and \] and / and | are all fine]
-```
-
-Extended IPA characters and any other Unicode symbols (tone letters, arrows, etc.) can be used **directly** in annotations without escaping.
+- You are free to write `/` and `|` literally anywhere in IPA fragments and annotations.
+- The only syntax that uses `[` or `]` is annotations.  
+  If you need brackets in phonetic content, use alternative glyphs (e.g. `⟦ ⟧`) or treat them as annotations.
 
 ---
 
-## 6. Temporal anchors and pauses
+## 6. Temporal anchors, pipes, and pauses
 
 ### 6.1 Time format
 
 A **time anchor** is a non‑negative real value in seconds.
 
-Allowed textual forms:
+In TIPA v1.1 the textual form is **exactly**:
 
 ```text
-<digits>                 e.g. 0, 10, 156
-<digits>.<digits>        e.g. 156.0, 156.000, 157.097
-.<digits>                e.g. .25 (a quarter of a second)
+<digits> "." <digits>
 ```
+
+Examples:
+
+- `0.250`
+- `10.0`
+- `156.000`
+- `157.097`
+- `159.00`
 
 Formally:
 
-- A `time` is:
-
-  - one or more digits, optionally followed by `.` and one or more digits, **or**
-  - a leading `.` followed by one or more digits.
+```ebnf
+time = digit, { digit }, ".", digit, { digit } ;
+```
 
 Notes:
 
-- There is **no limit** on the number of digits before or after the decimal separator.
-- Tools may normalize times (e.g., fixed 3 decimal places) but must preserve semantics.
+- The number of digits before and after the decimal point is not limited.
+    - Tools may normalize (e.g. to 3 decimals) but must preserve numeric value.
+- Legacy forms are **invalid** as times:
+    - `.25` – must be written `0.25` or similar.
+    - `10` – must be written `10.0` or similar.
 - When times are used as anchors in utterances, they must appear as **standalone tokens** separated from other tokens by whitespace.
 
-### 6.2 Basic anchor patterns (without `|`)
+### 6.2 Anchors and `|` delimiters
 
-Anchors appear as numeric tokens **separated by spaces** from IPA fragments. There is no `|` syntax around them.
+TIPA still supports the original “bare” anchor syntax:
 
-Common patterns (spaces shown as `·` for clarity):
+#### 6.2.1 Bare anchor syntax (legacy / still valid)
 
-1. **Bounded fragment (start and end)**
+```text
+156.000 bõʒuɾ ma bɛlə! 156.800
+```
+
+Semantics:
+
+- The fragment `bõʒuɾ ma bɛlə!` starts at 156.000 s and ends at 156.800 s.
+
+Variants:
+
+1. **Start and end anchors**
 
    ```text
-   156.000·bõʒuɾ ma bɛlə!·156.800
+   156.000 bõʒuɾ ma bɛlə! 156.800
    ```
-
-   Means: the IPA fragment starts at `156.000` s and ends at `156.800` s.
 
 2. **Start anchor only**
 
    ```text
-   156.000·bõʒuɾ ma bɛlə!
+   156.000 bõʒuɾ ma bɛlə!
    ```
-
-   Means: the fragment begins at `156.000` s; the end time is not explicitly anchored.
 
 3. **End anchor only**
 
    ```text
-   bõʒuɾ ma bɛlə!·156.800
+   bõʒuɾ ma bɛlə! 156.800
    ```
-
-   Means: the fragment ends at `156.800` s; the start time is not explicitly anchored.
 
 4. **Inline anchor inside a word**
 
    ```text
-   bø·158.120·nwa
+   158.088 bø 158.120 nwa
    ```
 
-   Here `158.120` marks a precise boundary **between** the IPA sequences `bø` and `nwa`. The two fragments belong to the same orthographic word but have distinct timing.
+   `158.120` marks a boundary between `bø` and `nwa`.
+
+#### 6.2.2 Pipe‑guarded syntax (optional, recommended)
+
+For readability, you can explicitly delimit fragments with `|` between anchors and IPA:
+
+```text
+156.000 | bõʒuɾ ma bɛlə! | 156.800
+```
+
+General pattern:
+
+```text
+<time> | <IPA + annotations> | <time>
+```
+
+Semantics:
+
+- Times are still anchors.
+- `|` tokens are **pure delimiters** and **not part of the IPA fragment**.
+- They do not change timing; they only make anchor alignment visually obvious.
+
+Rules:
+
+- A **pipe delimiter** is the standalone token `|` (separated by whitespace).
+- A `|` token that is immediately before or after a time anchor may be treated by tools as a delimiter and **ignored** when reconstructing the phonetic string.
+- All other uses of `|` (including lines without times) are treated as the ordinary IPA suprasegmental symbol.
+
+Examples:
+
+```text
+156.000 | bõʒuɾ ma bɛlə! | 156.800
+@charlotte: 157.097 | bõʒuɾ [en souriant] | 157.600 158.088 | bø | 158.120 | nwa[trainant] | 159.000
+```
+
+In both examples, the fragments have the same timings they would have under the bare syntax.
+
+**Spacing variants**
+
+- In **Strict TIPA** (§9), pipes used as delimiters **must** appear with spaces on both sides: ` | `.
+- Parsers may be lenient and normalize variants like:
+
+  ```text
+  156.000 |bõʒuɾ ma bɛlə! | 156.800
+  156.000| bõʒuɾ ma bɛlə!|156.800
+  ```
+
+  to the canonical:
+
+  ```text
+  156.000 | bõʒuɾ ma bɛlə! | 156.800
+  ```
+
+  but such normalization is implementation‑defined, not part of the core grammar.
 
 ### 6.3 Pauses
 
@@ -366,20 +437,20 @@ Means: a **silent pause** between `10.300` s and `10.800` s.
 Notes:
 
 - The duration of the pause is `tEnd - tStart`.
-- The pipe character `|` is used **only** in the pause marker `||` and nowhere else in the syntax.  
-  Inside IPA fragments and annotations, `|` is just another character (see §5.3).
+- `||` is a dedicated pause token and is not confused with two pipe delimiters.
+- As with anchors, `tStart` and `tEnd` must be valid times (`<digits>.<digits>`).
 
 ### 6.4 General anchor sequences in an utterance
 
-An utterance body is effectively a **sequence of time anchors, pauses, IPA fragments, and annotations**.
+An utterance body is effectively a **sequence of time anchors, pauses, optional `|` delimiters, IPA fragments, and annotations**.
 
 Example:
 
 ```text
-@charlotte: 157.097 bõʒuɾ [en souriant] 157.600 158.088 bø 158.120 nwa[trainant] 159.00
+@charlotte: 157.097 | bõʒuɾ [en souriant] | 157.600 158.088 | bø | 158.120 | nwa[trainant] | 159.000
 ```
 
-Tokenized conceptually as:
+Conceptually:
 
 - Anchor `157.097`
 - Fragment `bõʒuɾ [en souriant]`
@@ -388,30 +459,36 @@ Tokenized conceptually as:
 - Fragment `bø`
 - Anchor `158.120`
 - Fragment `nwa[trainant]`
-- Anchor `159.00`
+- Anchor `159.000`
+
+Pipes `|` serve only as optional visual boundaries.
 
 Semantics:
 
 1. **Fragments and their anchors**
 
-   - Each IPA fragment may have:
-     - A **start anchor**: the closest anchor **immediately before** it on the same line.
-     - An **end anchor**: the closest anchor **immediately after** it on the same line.
+   For each IPA fragment:
 
-   - If both exist, the fragment’s duration is fully defined.
-   - If only one exists, only the start or end time is known.
-   - If no anchor exists, no timing is defined for that fragment.
+    - **Start anchor**: the closest time anchor **immediately before** the fragment on the same line.
+    - **End anchor**: the closest time anchor **immediately after** the fragment on the same line.
+
+   Ignoring any `|` delimiters and annotations in between.
+
+    - If both exist, the fragment’s duration is defined.
+    - If only one exists, only start or end time is known.
+    - If no anchors exist on the line, the fragment is untimed.
 
 2. **Shared anchors**
 
-   - A time anchor can serve as the:
-     - End time of the fragment before it, and
-     - Start time of the fragment after it.
+   A time anchor can serve as:
 
-   In the previous example:
+    - End time of the fragment before it, and
+    - Start time of the fragment after it.
 
-   - `bø` is between 158.088 s and 158.120 s.
-   - `nwa[trainant]` is between 158.120 s and 159.00 s.
+   In the example:
+
+    - `bø` is between 158.088 s and 158.120 s.
+    - `nwa[trainant]` is between 158.120 s and 159.000 s.
 
 3. **Pauses**
 
@@ -421,20 +498,19 @@ Semantics:
    tStart || tEnd
    ```
 
-   - It is a **special token** that defines a silent interval.
-   - It contains no IPA fragment and does not share anchors with adjacent fragments, except that:
-     - `tStart` may equal the end anchor of the fragment before the pause.
-     - `tEnd` may equal the start anchor of the fragment after the pause.
+    - It defines a silent interval.
+    - It does not contain any IPA fragment.
+    - `tStart`/`tEnd` may equal adjacent fragment anchors.
 
 ### 6.5 Anchor monotonicity (per sentence)
 
 For **Strict TIPA**:
 
-- Within a single utterance line, consider all times in order of appearance that are:
-  - standalone time anchors, and
-  - left/right endpoints of pauses (`t1` and `t2` in `t1 || t2`).
+- Within a single utterance line, collect all times that appear:
+    - As standalone anchors, and
+    - As left/right endpoints of pauses (`t1 || t2`).
 
-For any consecutive pair of anchors `(t_i, t_{i+1})` used to delimit a fragment or pause, the linter must ensure:
+For any consecutive pair of anchors `(t_i, t_{i+1})` used to delimit a fragment or a pause, the linter must ensure:
 
 ```text
 t_{i+1} > t_i
@@ -458,10 +534,11 @@ Where:
 
 - `@roleId: ` is optional (see §4.4).
 - `<utterance body>` is a sequence of:
-  - time anchors (tokens matching the `time` syntax)
-  - pauses (`t1 || t2`)
-  - IPA fragments
-  - Annotations (`[...]`)
+    - time anchors (`<digits>.<digits>`)
+    - pauses (`t1 || t2`)
+    - optional pipe delimiters (`|`)
+    - IPA fragments
+    - Annotations (`[...]`)
 
 The first `# ` or `## ` that satisfies the comment rules in §3.1 starts an inline comment to the end of the line.
 
@@ -470,11 +547,12 @@ The first `# ` or `## ` that satisfies the comment rules in §3.1 starts an inli
 An utterance may contain multiple anchored regions and pauses:
 
 ```text
-@charlotte: 157.097 bõʒuɾ [en souriant] 157.600 158.088 bø 158.120 nwa[trainant] 159.00
+@charlotte: 157.097 | bõʒuɾ [en souriant] | 157.600 158.088 | bø | 158.120 | nwa[trainant] | 159.000
 ```
 
 - Parsers should treat the entire body as a single temporal sequence.
 - Whitespace outside IPA/annotations is a separator and may be normalized.
+- Optional `|` delimiters do not affect timings; they are purely structural hints.
 
 ### 7.3 Utterances without anchors
 
@@ -491,7 +569,7 @@ Anchors are optional:
 
 ## 8. Grammar (informative EBNF)
 
-The following grammar is **informative**, not the only possible implementation, but captures the intended structure.
+The following grammar is **informative**. It captures the intended structure but does not prescribe a particular tokenizer.
 
 ```ebnf
 document        = { line }, EOF ;
@@ -511,8 +589,7 @@ role-decl-line  = role-name, whitespace*, "=", whitespace*,
 
 utterance-line  = [ role-prefix ],
                   utterance-body,
-                  [ whitespace, inline-comment ],
-                  ;
+                  [ whitespace, inline-comment ] ;
 
 role-prefix     = role-name, whitespace*, ":", whitespace* ;
 
@@ -523,54 +600,50 @@ utterance-body  = { utterance-token, [ whitespace ] } ;
 
 utterance-token = pause
                 | time-anchor
+                | pipe-delimiter
+                | annotation
                 | fragment ;
 
 pause           = time, whitespace*, "||", whitespace*, time ;
 
 time-anchor     = time ;
 
-fragment        = { ipa-char-or-annotation }+ ;
-
-ipa-char-or-annotation
-                = annotation
-                | ipa-char ;
+pipe-delimiter  = "|" ;
 
 annotation      = "[", { annotation-char }, "]" ;
 
-ipa-char        = unicode-char
+fragment        = { fragment-char }+ ;
+
+fragment-char   = unicode-char
                   - line-break
                   - "["
-                  - "]"
-                  - "\\"
-                | escape-seq ;
+                  - "]" ;
 
 annotation-char = unicode-char
                   - line-break
-                  - "["
-                  - "]"
-                  - "\\"
-                | escape-seq ;
+                  - "["    (* nested [ not allowed *)
+                  - "]" ;  (* closes the annotation *)
 
-escape-seq      = "\\", ( "[" | "]" | "\\" ) ;
-
-time            = digit, { digit }, [ ".", digit, { digit } ]
-                | ".", digit, { digit } ;
+time            = digit, { digit }, ".", digit, { digit } ;
 
 inline-comment  = "#", [ "#" ], " ",
                   { any-char-except-line-break } ;
 ```
 
-Notes:
+**Notes for implementers**
 
-- This grammar treats each numeric `time` as a `time-anchor` token.
-- The semantics (mapping anchors and pauses to fragments) follow §6.4–§6.5.
-- Implementations may tokenize differently as long as they preserve the same observable behavior.
+- The grammar treats `|` as a generic `pipe-delimiter` token.
+    - In lines with **no times**, these tokens can be treated as 1‑character IPA fragments `|` (IPA minor group boundary).
+    - In lines with times:
+        - `|` tokens directly adjacent to times can be treated as visual delimiters and ignored for timing.
+        - Other `|` tokens may be treated as IPA suprasegmental symbols if desired.
+- There is **no `escape-seq` production** in v1.1; backslash `\` is just another `fragment-char` or `annotation-char`.
 
 ---
 
 ## 9. Strict TIPA profile (“Strict IPA”)
 
-A **Strict TIPA** (a.k.a. *Strict IPA*) document is a normalized form that a linter can produce automatically.
+A **Strict TIPA** document is a normalized form for tooling and storage.
 
 A linter that transforms a TIPA file into Strict TIPA must apply the following rules:
 
@@ -584,13 +657,13 @@ For every utterance line that does **not** start with `@roleId:` or `@roleId =`:
 Example input:
 
 ```text
-156.000 bõʒuɾ ma bɛlə! 156.800
+156.000 | bõʒuɾ ma bɛlə! | 156.800
 ```
 
 Strict TIPA output:
 
 ```text
-@0: 156.000 bõʒuɾ ma bɛlə! 156.800
+@0: 156.000 | bõʒuɾ ma bɛlə! | 156.800
 ```
 
 ### 9.2 Role declarations
@@ -618,8 +691,8 @@ For each role used in at least one utterance (i.e., appearing as `@roleId:`):
 For each utterance line:
 
 1. Collect all time values that appear:
-   - As standalone anchors (tokens matching `time` in the utterance body).
-   - As the left/right endpoints of pauses (`t1 || t2`).
+    - As standalone anchors (tokens matching `time` in the utterance body).
+    - As left/right endpoints of pauses (`t1 || t2`).
 
 2. Sort them in order of appearance on the line: `t0, t1, t2, ...`.
 
@@ -637,36 +710,44 @@ t_{i+1} > t_i
 - Single anchor: an utterance with a single anchor is valid; only one boundary is known.
 - Multiple anchors: must satisfy the monotonicity rule above.
 
-### 9.5 Escaping invariants
+### 9.5 Structural character invariants
 
 In Strict TIPA:
 
-- Inside IPA fragments and annotations, the characters `[` and `]` must appear **only** as:
-  - `\[` to denote a literal `[`, or
-  - `\]` to denote a literal `]`.
-- Backslash `\` must appear **only** as:
-  - `\\` (literal backslash),
-  - `\[` or `\]` (as above).
-- No other escaping is required or allowed:
-  - Sequences such as `\|`, `\/`, `\:` etc. **must not** appear in Strict TIPA.
-  - Characters `/`, `|`, `:`, `@`, `#`, and any standard or extended IPA symbols must appear literally.
-- A linter must:
-  - Escape any unescaped `[` or `]` that appear inside IPA fragments or annotations.
-  - Remove obsolete or unnecessary escapes for other characters.
+- IPA/extIPA fragments must **never** contain `[` or `]`.  
+  These characters are reserved exclusively for annotations.
+- There are **no escape sequences**:
+    - Backslash `\` appears only as itself (typically extIPA stutter), never as an escape.
+    - Sequences such as `\[`, `\]`, `\\`, `\|`, `\/` must be treated literally and are not produced by a linter.
+- Pipes used as anchor delimiters must be in canonical form:
+
+  ```text
+  space, "|", space
+  ```
+
+  For example:
+
+  ```text
+  156.000 | bõʒuɾ ma bɛlə! | 156.800
+  ```
+
+- Whitespace between tokens:
+    - Outside IPA fragments and annotations, whitespace may be normalized to single spaces.
+    - Inside fragments and annotations, whitespace must be preserved verbatim.
 
 ---
 
 ## 10. Examples
 
-### 10.1 Simple dialogue with roles and timing
+### 10.1 Simple dialogue with roles, timing, and pipes
 
 ```text
 @benoit = A man
 @charlotte = A woman
 
 # Greeting
-@benoit: 156.000 bõʒuɾ ma bɛlə! 156.800
-@charlotte: 157.097 bõʒuɾ [en souriant] 157.600 158.088 bø 158.120 nwa[trainant] 159.00
+@benoit: 156.000 | bõʒuɾ ma bɛlə! | 156.800
+@charlotte: 157.097 | bõʒuɾ [en souriant] | 157.600 158.088 | bø | 158.120 | nwa[trainant] | 159.000
 ```
 
 ### 10.2 Example with a pause
@@ -674,7 +755,7 @@ In Strict TIPA:
 ```text
 @0 = Default role
 
-@0: 10.000 ɔlə 10.300 10.300 || 10.800 10.800 sa va 11.200
+@0: 10.000 | ɔlə | 10.300 10.300 || 10.800 10.800 | sa va | 11.200
 ```
 
 Semantics:
@@ -683,38 +764,45 @@ Semantics:
 - Silence from 10.300 s to 10.800 s
 - `sa va` from 10.800 s to 11.200 s
 
-### 10.3 Escaping inside IPA and annotations
+### 10.3 IPA/extIPA inside fragments (no escaping)
 
 ```text
 @spk1 = Narrator
 
-@spk1: 0.000 i di \[meta\] pa:se / eksperimɑ̃ 2.500 [note: includes literal \[ and \] and / and |]
+@spk1: 0.000 | i di meta paːse / eksperimɑ̃ | 2.500
+@spk1: 2.500 | p\p\p [stuttered onset] | 3.000
+@spk1: 3.000 | ka|ta [minor group boundary in IPA] | 4.000
 ```
 
 Interpretation:
 
-- The fragment `i di [meta] pa:se / eksperimɑ̃` runs from 0.000 s to 2.500 s.
-- Inside the annotation, `\[` and `\]` give literal `[` and `]`.
-- Slash `/` and pipe `|` are used directly without escaping.
+- The first fragment runs from 0.000 s to 2.500 s and contains `/` literally.
+- The second fragment runs from 2.500 s to 3.000 s and contains `p\p\p`; backslash is purely extIPA.
+- The third fragment uses `|` inside the IPA string as the standard minor group boundary.  
+  The `|` characters near the times are used only as visual delimiters.
 
 ---
 
 ## 11. Summary
 
-- TIPA is a UTF‑8 text format for IPA transcripts with:
-  - Multi‑role attribution using `@roleId` and `@roleId:`
-  - Temporal anchors expressed as real values in seconds, written as standalone numeric tokens
-  - Pauses with `t1 || t2`
-  - Inline annotations in `[ ... ]`
-  - Inline and whole-line comments using `# ` and `## `
-  - Escaping of **only** `[` `]` and `\` inside IPA fragments and annotations
-- The format supports **full IPA and extended IPA** (extIPA, tone letters, prosodic symbols, etc.) as plain Unicode characters, without special escaping.
-- The **Strict TIPA** profile defines a canonical form suitable for tooling and storage, enforcing:
-  - Explicit roles for every utterance (`@0:` when none is given)
-  - Role declarations for all used roles
-  - Monotonic anchor times within each utterance
-  - Minimal, consistent escaping of `[` `]` and `\`, with `/` and `|` never needing escapes inside IPA or annotations.
+- TIPA is a UTF‑8 text format for IPA/extIPA transcripts with:
+    - Multi‑role attribution using `@roleId` and `@roleId:`
+    - Temporal anchors expressed as real values in seconds, written as `<digits>.<digits>` tokens
+    - Pauses with `t1 || t2`
+    - Optional pipe delimiters `|` around anchored fragments
+    - Inline annotations in `[ ... ]`
+    - Inline and whole‑line comments using `# ` and `## `
 
+- TIPA v1.0 guarantees that:
+    - Inside IPA/extIPA fragments, **no escaping is ever required**.
+    - All IPA/extIPA graphemes, including `\` and `|`, are taken literally.
+    - Square brackets are reserved for annotations and cannot appear in phonetic fragments.
 
+- The **Strict TIPA** profile defines a canonicalized form suitable for tooling and storage, enforcing:
+    - Explicit roles for every utterance (`@0:` when none is given)
+    - Role declarations for all used roles
+    - Monotonic anchor times within each utterance
+    - No escape sequences; structural use of `|` in the canonical ` | ` form
+    - Clean separation between annotations (`[...]`) and phonetic content.
 
 © 2025 Benoit Pereira da Silva – Licensed under Creative Commons Attribution 4.0 International (CC BY 4.0).
