@@ -1,6 +1,6 @@
 # TIPA
 
-![](assets/logo.png)
+![](assets/logo-sm.jpg)
 
 This repository contains: 
 1. [TIPA v1.0 specifications](specifications/TIPAv1.0.md) for the "Temporal IPA" format.
