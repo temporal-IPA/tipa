@@ -2,7 +2,7 @@
 
 - **Version**: 1.0 (draft)
 - **Author**: Benoit Pereira da Silva
-- **Date**: 28/11/2025
+- **Date**: 30/11/2025
 
 ---
 
@@ -46,6 +46,7 @@ PTIPA reuses the **entire structural layer** of TIPA v1.0:
 - Inline annotations in `[ ... ]`
 - Whole‑line and inline comments using `# ` and `## `
 - The **Strict profile** with role injection and monotonic anchor checks
+- The **double‑quoted fragment** mechanism (for fragments that may contain `[` `]` `|` or `"`), with the same `"` rule.
 
 The only conceptual difference is the **nature of the fragments** between anchors:
 
@@ -78,16 +79,20 @@ PTIPA inherits TIPA’s core design principle:
 
 Concretely:
 
-- Inside text fragments, PTIPA does **not** introduce any escape character.
-- Characters such as `/`, `\`, `|`, `@`, `:`, `#` are always taken **literally** inside fragments.
+- Fragments may be written **bare** (`Bonjour ma belle !`) or **quoted** (`"Bonjour ma belle !"`) in exactly the same way as TIPA fragments.
+- PTIPA does **not** introduce any general escape character.
+- Characters such as `/`, `\`, `|`, `@`, `:`, `#` are always taken **literally** inside fragments, with one exception:
+  - Inside a quoted fragment, the two‑character sequence `"` represents a literal double quote `"` (see §5.3).
 - Structural syntax (roles, anchors, pauses, annotations, comments) lives **around** fragments, not inside them.
 
-The only reserved characters inside fragments are:
+Structural characters:
 
-- `[` and `]`, which are reserved for annotations and therefore **cannot** appear inside a fragment.
-- Line breaks, which terminate a fragment.
+- Outside quoted fragments, the characters:
+  - `[` and `]` are reserved for annotations.
+  - Standalone `|` tokens and the `||` token are structural (delimiters and pauses).
+- Inside quoted fragments, `[` `]` and `|` are just text.
 
-As in TIPA, if literal brackets are needed inside content, they should be written using alternative glyphs (`⟦ ⟧`, spelled out words, etc.) or carried via annotations rather than inside fragments.
+As in TIPA, if literal brackets or pipes are needed in **bare** content, the fragment **must** be written as a quoted fragment.
 
 ---
 
@@ -109,11 +114,12 @@ PTIPA does not constrain the language or script; phonetizers are expected to use
 
 Exactly as in TIPA:
 
-- The document is a sequence of **lines** separated by `LF` (`
-`), `CRLF` (`
-`) or `CR` (``).
+- The document is a sequence of **lines** separated by:
+  - `LF` (`\n`), or
+  - `CRLF` (`\r\n`), or
+  - `CR` (`\r`).
 - Leading and trailing whitespace on a line is ignored **except** inside:
-  - text fragments
+  - text fragments (bare or quoted)
   - annotations (`[...]`)
 
 ### 2.3 Line types
@@ -142,14 +148,15 @@ Comments behave exactly as in TIPA:
 - An **inline comment** can appear after an utterance on the same line:
 
   ```text
-  @benoit: 12.000 | Bonjour ma belle ! | 12.600  # inline comment
-  @charlotte: 13.097 | Bonjour [en souriant] | 13.600  ## stronger comment
+  @benoit:   12.000 | "Bonjour ma belle !" | 12.600  # inline comment
+  @charlotte: 13.097 | "Bonjour" [en souriant] "benoit" | 13.600  ## stronger comment
   ```
 
 Parsing rules (identical to TIPA):
 
 - The first `#` that:
   - is **not** inside an annotation (`[...]`), and
+  - is **not** inside a quoted fragment (`"..."`), and
   - is either the first non‑whitespace character on the line, **or** is preceded by whitespace,
   - and is followed by a space (`# ` or `## `)
 
@@ -186,8 +193,8 @@ Roles in PTIPA are identical to roles in TIPA.
 A PTIPA utterance may be prefixed by a role:
 
 ```text
-@benoit: 12.000 | Bonjour ma belle ! | 12.600
-@charlotte: 13.097 | Bonjour [en souriant] | 13.600
+@benoit:   12.000 | "Bonjour ma belle !" | 12.600
+@charlotte: 13.097 | "Bonjour" [en souriant] "benoit" | 13.600
 ```
 
 - The first colon `:` after the role name is treated as the separator.
@@ -198,7 +205,7 @@ A PTIPA utterance may be prefixed by a role:
 As in TIPA, utterance lines may omit any role prefix:
 
 ```text
-12.000 | Bonjour ma belle ! | 12.600
+12.000 | "Bonjour ma belle !" | 12.600
 ```
 
 In the **Strict PTIPA** profile, these lines are treated as belonging to a synthetic role `@0` (see §8.1).
@@ -207,15 +214,15 @@ In the **Strict PTIPA** profile, these lines are treated as belonging to a synth
 
 ## 5. Text fragments, annotations and characters
 
-### 5.1 Text fragments
+### 5.1 Text fragments (bare vs quoted)
 
 A **text fragment** is the content between anchors and annotations, e.g.:
 
 ```text
-Bonjour ma belle !
-Je suis ravi de te revoir.
-OK, ça marche.
-i did meta passe / experimantation
+"To be, or not to be."
+"All the world's a stage."
+"The lady doth protest too much, methinks."
+"Exit, pursued by a bear."
 ```
 
 Fragments may contain:
@@ -225,33 +232,62 @@ Fragments may contain:
 - Digits and symbols
 - Arbitrary Unicode characters, including IPA/extIPA graphemes
 
+Surface forms:
+
+1. **Bare fragments**:
+
+   ```text
+   To
+   be,
+   or
+   not
+   to
+   be.
+   ```
+
+2. **Quoted fragments**:
+
+   ```text
+   "To be, or not to be."
+   "He said: "The play's the thing""
+   ```
+
+Quoting rules:
+
+- PTIPA mirrors TIPA’s quoting rules:
+  - Quoted fragments are strongly recommended for all new content.
+  - In **Strict PTIPA** (§8), **all fragments must be quoted**.
+- A **bare fragment MUST NOT contain**:
+  - `[` or `]` (annotation markers)
+  - `|` (pipe, used structurally)
+  - `"` (double quote, used as string delimiter)
+- Any fragment whose content contains one of these characters **must** be written as a quoted fragment:
+
+  ```text
+  12.000 | "He said: "The play's the thing"" | 13.000
+  20.000 | "This [in brackets]" | 21.000
+  22.000 | "A|B" | 22.500
+  ```
+
 PTIPA does **not** distinguish between tokens and sub‑tokens:
 
-- `Bonjour ma belle !` may be treated as a single fragment, or
-- `Bonjour`, `ma`, `belle !` may be separate fragments
+- `"To be, or not to be."` may be treated as a single fragment, or
+- `"To"`, `"be,"`, `"or"`, `"not"`, `"to"`, `"be."` may be separate fragments
 
 depending only on how the author places anchors and annotations.
-
-As in TIPA:
-
-- **No escaping is ever required or recognized inside fragments.**
-- Characters like `/`, `|`, `\`, `@`, `#`, `:` are all taken literally.
-- The only characters that **cannot** appear inside a fragment are:
-  - `[` and `]` (reserved for annotations)
-  - Line breaks
 
 ### 5.2 Mixed text and IPA
 
 PTIPA allows **mixed content** inside fragments:
 
 ```text
-Je dis "bonjour" [fr-FR] → / bɔ̃ʒuʁ /
+"I say "To be, or not to be" [en-GB] → /tə ˈbiː ɔː ˈnɒt tə ˈbiː/"
 ```
 
 Here:
 
-- `Je dis "bonjour" [fr-FR] → / bɔ̃ʒuʁ /` is a single text fragment.
-- The `/ bɔ̃ʒuʁ /` sequence is syntactically just text.
+- The entire string is one text fragment.
+- `/tə ˈbiː ɔː ˈnɒt tə ˈbiː/` and `[en-GB]` are just characters inside the fragment (the square brackets do **not** start an annotation because they are inside quotes).
 
 Tools are free to apply heuristics, such as:
 
@@ -275,14 +311,13 @@ Rules:
 
 - Syntax: `[annotation text]`
 - They may appear:
-  - Between words
-  - Between fragments
+  - Between words or fragments
   - Adjacent to anchors and `|` delimiters
 
 Example:
 
 ```text
-@charlotte: 13.097 | Bonjour [en souriant] | 13.600
+@charlotte: 13.097 | "Bonjour" [en souriant] "benoit" | 13.600
 ```
 
 Inside annotations:
@@ -299,15 +334,30 @@ Annotations are the recommended place for:
 
 These values are **conventions**, not part of the core syntax.
 
-### 5.4 No escape sequences
+Interaction with quoting:
 
-PTIPA inherits TIPA’s “no escape” rule:
+- `[` and `]` start/end annotations only when they appear **outside** quoted fragments.
+- Inside quoted fragments, they are just text.
 
-- Backslash `\` is never an escape.
-- Sequences like `\[`, `\]`, `\`, `\|`, `\/` have **no special meaning**.
-- If a literal `[` or `]` is required in a fragment, it must be encoded indirectly (e.g. via annotations or alternative glyphs).
+### 5.4 Backslash and double quotes
 
-This makes PTIPA robust for both text and mixed text/IPA without complex escaping rules.
+PTIPA inherits the same minimal escaping behavior as TIPA:
+
+- Backslash `\` is never a generic escape.
+- The **only** special sequence is `"` **inside a quoted fragment**, which represents a literal double quote.
+
+Examples inside quoted fragments:
+
+```text
+"il a dit : "bonjour""   # content: il a dit : "bonjour"
+"p\p\p"                    # content: p\p\p
+"\test"                   # content: 	est
+```
+
+In bare fragments and annotations:
+
+- `\` has no special meaning.
+- Sequences such as `\[`, `\]`, `\/`, `\|` are taken literally.
 
 ---
 
@@ -327,7 +377,7 @@ Examples:
 
 - `0.250`
 - `10.0`
-- `156.000`
+- `12.000`
 - `13.097`
 
 Formally:
@@ -345,37 +395,37 @@ PTIPA accepts both **bare** and **pipe‑guarded** anchor styles.
 #### 6.2.1 Bare anchor syntax
 
 ```text
-12.000 Bonjour ma belle ! 12.600
+12.000 "Bonjour ma belle !" 12.600
 ```
 
 Semantics:
 
-- The fragment `Bonjour ma belle !` starts at 12.000 s and ends at 12.600 s.
+- The fragment `"Bonjour ma belle !"` starts at 12.000 s and ends at 12.600 s.
 
 Variants:
 
 1. **Start and end anchors**
 
    ```text
-   12.000 Bonjour ma belle ! 12.600
+   12.000 "Bonjour ma belle !" 12.600
    ```
 
 2. **Start anchor only**
 
    ```text
-   12.000 Bonjour ma belle !
+   12.000 "Bonjour ma belle !"
    ```
 
 3. **End anchor only**
 
    ```text
-   Bonjour ma belle ! 12.600
+   "Bonjour ma belle !" 12.600
    ```
 
 4. **Inline anchor inside a sentence**
 
    ```text
-   12.000 Bonjour ma belle ! 12.600 Ça va ? 13.000
+   12.000 "Bonjour ma belle !" 12.600 "Ça va ?" 13.000
    ```
 
 #### 6.2.2 Pipe‑guarded syntax (recommended)
@@ -383,13 +433,13 @@ Variants:
 For readability, anchors may be visually separated using `|`:
 
 ```text
-12.000 | Bonjour ma belle ! | 12.600
+12.000 | "Bonjour ma belle !" | 12.600
 ```
 
 Pattern:
 
 ```text
-<time> | <text + annotations> | <time>
+<time> | <fragment + annotations> | <time>
 ```
 
 Semantics:
@@ -400,10 +450,9 @@ Semantics:
 
 Rules:
 
-- A **pipe delimiter** is the standalone token `|` (separated by whitespace).
+- A **pipe delimiter** is the standalone token `|` (separated by whitespace and not inside quotes).
 - In **Strict PTIPA**, delimiters are written as `space, '|', space` (` | `).
-
-All other uses of `|` (not as standalone tokens) are treated as ordinary characters inside fragments or annotations.
+- Any literal `|` needed in text must appear inside a quoted fragment (e.g. `"A|B"`).
 
 ### 6.3 Pauses
 
@@ -432,7 +481,7 @@ Within an utterance line, the body is a sequence of:
 - Time anchors (`<digits>.<digits>`)
 - Pauses (`t1 || t2`)
 - Optional pipe delimiters (`|`)
-- Text fragments
+- Text fragments (bare or quoted)
 - Annotations (`[...]`)
 
 For each fragment:
@@ -440,7 +489,7 @@ For each fragment:
 - **Start time**: closest time anchor immediately before the fragment on the same line.
 - **End time**: closest time anchor immediately after the fragment on the same line.
 
-As in TIPA, anchors may be shared between neighboring fragments.
+Anchors may be shared between neighboring fragments.
 
 ### 6.5 Anchor monotonicity (per sentence)
 
@@ -479,7 +528,7 @@ The **Strict PTIPA** profile provides a canonical representation, mirroring the 
 For every utterance line that does **not** start with `@roleId:` or a role declaration:
 
 1. Prepend `@0: `.
-2. Optionally ensure that there is a declaration for `@0`:
+2. Ensure that there is a declaration for `@0`:
 
    ```text
    @0 = Default role
@@ -510,16 +559,31 @@ Within each utterance:
 
 Violations must be reported as errors or warnings; Strict PTIPA output should not be emitted without correcting times.
 
-### 8.4 Structural invariants
+### 8.4 Structural invariants and quoting
 
 In Strict PTIPA:
 
-- Fragments must **not** contain `[` or `]`.
-- There are **no escape sequences**; backslash `\` is never special.
+- **All fragments must be quoted**.  
+  Bare fragments may appear in non‑strict input but are normalized to quoted fragments.
+
+  Example:
+
+  ```text
+  @benoit: 12.000 | Bonjour ma belle ! | 12.600
+  ```
+
+  becomes:
+
+  ```text
+  @benoit: 12.000 | "Bonjour ma belle !" | 12.600
+  ```
+
+- Fragments may contain `[` `]` and `|` freely, because they are inside quotes.
+- There are **no escape sequences** beyond `"` inside quoted fragments; `\` is literal otherwise.
 - Pipes used as anchor delimiters must appear in canonical form:
 
   ```text
-  12.000 | Bonjour ma belle ! | 12.600
+  12.000 | "Bonjour ma belle !" | 12.600
   ```
 
 - Whitespace:
@@ -534,7 +598,7 @@ All of these rules are inherited directly from Strict TIPA and keep the formats 
 
 ### 9.1 Using one file as PTIPA and TIPA
 
-Because TIPA and PTIPA share the same structural layer:
+Because TIPA and PTIPA share the same structural layer **and the same quoting rules**:
 
 - The **same file** can be:
   - treated as **PTIPA** when running text‑centric tools (segmentation, normalization, metadata extraction),
@@ -542,7 +606,7 @@ Because TIPA and PTIPA share the same structural layer:
 
 This is possible because PTIPA’s parser:
 
-- Does not attempt to interpret fragments beyond “arbitrary UTF‑8 text minus `[` and `]`”.
+- Does not attempt to interpret fragments beyond “arbitrary UTF‑8 text minus structural constraints”.
 - Accepts all IPA/extIPA characters without special casing.
 
 ### 9.2 Typical PTIPA ⇒ TIPA pipeline
@@ -563,7 +627,7 @@ A typical workflow is:
 3. **Emit TIPA**
 
    - Write a TIPA file with identical roles, anchors, pauses, annotations and comments, but:
-     - Replace each PTIPA fragment with one or more IPA/extIPA fragments.
+     - Replace each PTIPA fragment with one or more IPA/extIPA fragments (quoted in the same way).
      - Optionally refine the temporal structure (e.g. add more anchors inside words).
 
 Because the syntax is shared, tools can keep references between PTIPA and TIPA at the level of:
@@ -591,12 +655,12 @@ The only caution is to preserve anchors and roles to maintain alignment.
 ### 10.1 Simple dialogue (PTIPA only)
 
 ```text
-@benoit = A man
-@charlotte = A woman
+@hamlet = Prince of Denmark
+@ophelia = Daughter of Polonius
 
-# Greeting
-@benoit: 12.000 | Bonjour ma belle ! | 12.600
-@charlotte: 13.097 | Bonjour [en souriant] | 13.600 13.800 | Ben oui, ça va. | 14.400
+# Soliloquy
+@hamlet:   12.000 | "To be, or not to be." | 14.000
+@ophelia:  14.500 | "That is the question." [aside] | 16.000 16.200 | "Soft you now," [softly] | 17.000
 ```
 
 ### 10.2 Mixed PTIPA/TIPA fragments in one file
@@ -605,10 +669,10 @@ The only caution is to preserve anchors and roles to maintain alignment.
 @spk1 = Narrator
 
 # Text fragment, to be phonetized later
-@spk1: 0.000 | Je dis "meta passe expérimentation". | 3.000
+@spk1: 0.000 | "He says "To be, or not to be."" | 3.000
 
 # IPA fragment passed through as-is (already phonetic)
-@spk1: 3.000 | / meta pas ekspeʁimɑ̃tasjɔ̃ / | 5.000
+@spk1: 3.000 | "/tə ˈbiː ɔː ˈnɒt tə ˈbiː/" | 5.000
 ```
 
 Both lines are valid PTIPA. The second line is also a perfectly valid TIPA utterance.
@@ -618,14 +682,14 @@ Both lines are valid PTIPA. The second line is also a perfectly valid TIPA utter
 ```text
 @0 = Default role
 
-@0: 10.000 | Allô | 10.300 10.300 || 10.800 10.800 | ça va ? | 11.200
+@0: 10.000 | "All" | 10.300 10.300 || 10.800 10.800 | "the world's a stage." | 11.600
 ```
 
 Semantics:
 
-- `Allô` from 10.000 s to 10.300 s
+- `"All"` from 10.000 s to 10.300 s
 - Silence from 10.300 s to 10.800 s
-- `ça va ?` from 10.800 s to 11.200 s
+- `"the world's a stage."` from 10.800 s to 11.600 s
 
 ---
 
@@ -638,6 +702,7 @@ PTIPA is a **pre‑phonetic sibling** of TIPA:
   - Anchors and pauses
   - Annotations and comments
   - Strict profile and monotonicity checks
+  - Optional but recommended double‑quoted fragments
 - It only changes the **interpretation of fragments**:
   - from “IPA/extIPA phonetic strings” (TIPA)
   - to “arbitrary plain‑text strings” (PTIPA)
