@@ -88,14 +88,13 @@ type Preloader interface {
 	// Sniff inspects a prefix of the input (sniff) and decides whether
 	// this preloader is appropriate for the source.
 	//
-	// - path: optional file path or virtual name (may be empty).
 	// - sniff: initial bytes of the source (up to a few KB).
 	// - isEOF: true if sniff contains the full source.
-	Sniff(path string, sniff []byte, isEOF bool) bool
+	Sniff(sniff []byte, isEOF bool) bool
 
 	// Load parses the entire source from r and calls emit for each
 	// entry found. The path argument is purely informational.
-	Load(path string, r io.Reader, emit OnEntryFunc) error
+	Load(r io.Reader, emit OnEntryFunc) error
 }
 
 // LineParser is a per-line parser for text-based formats.
@@ -106,11 +105,10 @@ type LineParser func(line string) (word string, prons []string, err error)
 
 // NewLinePreloader constructs a Preloader that reads a text source
 // line by line and delegates actual parsing to the provided LineParser.
-// This makes it easy to support additional textual formats (e.g. Lexique,
-// Flexique, custom tab-separated dictionaries).
+// This makes it easy to support additional textual formats (e.g. Lexique, Flexique, custom tab-separated dictionaries).
 func NewLinePreloader(
 	kind Kind,
-	sniff func(path string, sniff []byte, isEOF bool) bool,
+	sniff func(sniff []byte, isEOF bool) bool,
 	parser LineParser,
 ) Preloader {
 	return &linePreloader{
@@ -124,20 +122,20 @@ func NewLinePreloader(
 // each entry fits on a single line.
 type linePreloader struct {
 	kind      Kind
-	sniffFunc func(path string, sniff []byte, isEOF bool) bool
+	sniffFunc func(sniff []byte, isEOF bool) bool
 	parseLine LineParser
 }
 
 func (p *linePreloader) Kind() Kind { return p.kind }
 
-func (p *linePreloader) Sniff(path string, sniff []byte, isEOF bool) bool {
+func (p *linePreloader) Sniff(sniff []byte, isEOF bool) bool {
 	if p.sniffFunc == nil {
 		return false
 	}
-	return p.sniffFunc(path, sniff, isEOF)
+	return p.sniffFunc(sniff, isEOF)
 }
 
-func (p *linePreloader) Load(path string, r io.Reader, emit OnEntryFunc) error {
+func (p *linePreloader) Load(r io.Reader, emit OnEntryFunc) error {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -147,7 +145,7 @@ func (p *linePreloader) Load(path string, r io.Reader, emit OnEntryFunc) error {
 
 		word, prons, err := p.parseLine(line)
 		if err != nil {
-			return fmt.Errorf("%s (%s): parse line %q: %w", path, p.kind, line, err)
+			return fmt.Errorf("(%s): parse line %q: %w", p.kind, line, err)
 		}
 		if word == "" || len(prons) == 0 {
 			continue
@@ -173,31 +171,14 @@ func (g *gobPreloader) Kind() Kind { return PreloadKindGOB }
 //     (".txt", ".txtipa", ".ipa");
 //   - otherwise, detected when the sniff bytes are not valid UTF-8 or contain
 //     NUL bytes. This avoids misclassifying regular text dictionaries as gob.
-func (g *gobPreloader) Sniff(path string, sniff []byte, isEOF bool) bool {
-	lower := strings.ToLower(path)
-
-	// If the path clearly looks like a text dictionary, never treat it as gob,
-	// even if the bytes look slightly odd.
-	if strings.HasSuffix(lower, ".txt") ||
-		strings.HasSuffix(lower, ".txtipa") ||
-		strings.HasSuffix(lower, ".ipa") {
-		return false
-	}
-
-	// Strong signal: explicit gob suffix.
-	if strings.HasSuffix(lower, ".gob") {
-		return true
-	}
-
+func (g *gobPreloader) Sniff(sniff []byte, isEOF bool) bool {
 	if len(sniff) == 0 {
 		return false
 	}
-
 	// If it's not valid UTF-8, it's very likely a binary (gob) payload.
 	if !utf8.Valid(sniff) {
 		return true
 	}
-
 	// Heuristic: presence of NUL bytes strongly suggests a binary format.
 	for _, b := range sniff {
 		if b == 0 {
@@ -208,11 +189,11 @@ func (g *gobPreloader) Sniff(path string, sniff []byte, isEOF bool) bool {
 }
 
 // Load decodes a gob-encoded map[string][]string and emits all entries.
-func (g *gobPreloader) Load(path string, r io.Reader, emit OnEntryFunc) error {
+func (g *gobPreloader) Load(r io.Reader, emit OnEntryFunc) error {
 	dec := gob.NewDecoder(r)
 	dict := make(map[string][]string)
 	if err := dec.Decode(&dict); err != nil {
-		return fmt.Errorf("decode gob %s: %w", path, err)
+		return fmt.Errorf("decode gob: %w", err)
 	}
 	for w, prons := range dict {
 		if len(prons) == 0 {
@@ -245,9 +226,9 @@ func RegisterPreloader(p Preloader) {
 // selectPreloader chooses the first preloader whose Sniff method returns true.
 // If none match, it falls back to defaultPreloader (the "native"
 // text format).
-func selectPreloader(path string, sniff []byte, isEOF bool) Preloader {
+func selectPreloader(sniff []byte, isEOF bool) Preloader {
 	for _, p := range builtinPreloaders {
-		if p.Sniff(path, sniff, isEOF) {
+		if p.Sniff(sniff, isEOF) {
 			return p
 		}
 	}
@@ -289,13 +270,12 @@ func PreloadBlobs(mode MergeMode, blobs ...[]byte) (entries map[string][]string,
 			sniff = sniff[:sniffLen]
 			isEOF = false
 		}
-
-		pl := selectPreloader(virtualPath, sniff, isEOF)
+		pl := selectPreloader(sniff, isEOF)
 		if pl == nil {
 			return nil, nil, nil, fmt.Errorf("no preloader matched for %s", virtualPath)
 		}
 
-		if err := runPreloader(pl, virtualPath, mode, bytes.NewReader(blob), rep); err != nil {
+		if err := runPreloader(pl, mode, bytes.NewReader(blob), rep); err != nil {
 			return nil, nil, nil, err
 		}
 	}
@@ -313,7 +293,6 @@ func PreloadInto(rep *Representation, mode MergeMode, paths ...string) error {
 	if rep == nil {
 		rep = NewRepresentation()
 	}
-
 	for _, p := range paths {
 		path := strings.TrimSpace(p)
 		if path == "" {
@@ -343,22 +322,21 @@ func preloadFromFile(rep *Representation, path string, mode MergeMode) error {
 	buf = buf[:n]
 	isEOF := readErr == io.EOF || readErr == io.ErrUnexpectedEOF || n == 0
 
-	pl := selectPreloader(path, buf, isEOF)
+	pl := selectPreloader(buf, isEOF)
 	if pl == nil {
 		return fmt.Errorf("no preloader matched for %s", path)
 	}
 
 	reader := io.MultiReader(bytes.NewReader(buf), f)
-	return runPreloader(pl, path, mode, reader, rep)
+	return runPreloader(pl, mode, reader, rep)
 }
 
 // runPreloader executes a preloader, applying MergeMode semantics and
 // global de‑duplication (word, pron) across all sources.
-func runPreloader(pl Preloader, path string, mode MergeMode, r io.Reader, rep *Representation) error {
+func runPreloader(pl Preloader, mode MergeMode, r io.Reader, rep *Representation) error {
 	if pl == nil {
-		return fmt.Errorf("nil preloader for %s", path)
+		return fmt.Errorf("nil preloader for ")
 	}
-
 	datasetWords := make(map[string]struct{})
 	replaced := make(map[string]struct{}) // used only in MergeModeReplace
 
@@ -417,8 +395,8 @@ func runPreloader(pl Preloader, path string, mode MergeMode, r io.Reader, rep *R
 		return nil
 	}
 
-	if err := pl.Load(path, r, emit); err != nil {
-		return fmt.Errorf("preload %s (%s): %w", path, pl.Kind(), err)
+	if err := pl.Load(r, emit); err != nil {
+		return fmt.Errorf("preload (%s): %w", pl.Kind(), err)
 	}
 
 	// After consuming the full dataset, record words that originate
@@ -438,77 +416,63 @@ func runPreloader(pl Preloader, path string, mode MergeMode, r io.Reader, rep *R
 //	à aucun moment\t/aokœ̃mɔmɑ̃/
 //
 // i.e. a tab, then an IPA string surrounded by slashes.
-func sniffTxtSlashedTipa(path string, sniff []byte, isEOF bool) bool {
+func sniffTxtSlashedTipa(sniff []byte, isEOF bool) bool {
 	if len(sniff) == 0 {
 		return false
 	}
-	if !bytes.Contains(sniff, []byte("\t")) {
-		return false
+	reader := bytes.NewReader(sniff)
+	scanner := bufio.NewScanner(reader)
+	i := 10 // scan 10 lines.
+	for scanner.Scan() {
+		line := scanner.Text()
+		line = strings.TrimSpace(line)
+		if !strings.Contains(line, "\t") {
+			return false
+		}
+		s := strings.Split(line, "\t")
+		if len(s) != 2 {
+			return false
+		}
+		if !strings.HasSuffix(s[1], "/") && !strings.HasSuffix(s[1], "/") {
+			return false
+		}
+		i--
+		if i == 0 {
+			break
+		}
 	}
-
-	idx := bytes.IndexByte(sniff, '\t')
-	if idx == -1 || idx+1 >= len(sniff) {
-		return false
-	}
-	rest := sniff[idx+1:]
-	rest = bytes.TrimLeft(rest, " ")
-
-	if len(rest) == 0 || rest[0] != '/' {
-		return false
-	}
-
-	// Ensure we have at least a closing slash.
-	if bytes.IndexByte(rest[1:], '/') == -1 {
-		return false
-	}
-
 	return true
 }
 
-// sniffTextTipa detects the native wikipa text format:
+// sniffTextTipa detects the native ipadict text format:
 //
 //	<word>\t<IPA1> | <IPA2> | ...
-//
-// It is deliberately permissive: as long as we see a tab and it does
-// not look like "tab + /", we treat it as ipa_text. Known text
-// extensions are treated as text even if the bytes are not strictly
-// valid UTF-8.
-func sniffTextTipa(path string, sniff []byte, isEOF bool) bool {
+func sniffTextTipa(sniff []byte, isEOF bool) bool {
 	if len(sniff) == 0 {
 		return false
 	}
-
-	if !bytes.Contains(sniff, []byte("\t")) {
-		return false
+	reader := bytes.NewReader(sniff)
+	scanner := bufio.NewScanner(reader)
+	i := 10 // scan 10 lines.
+	for scanner.Scan() {
+		line := scanner.Text()
+		line = strings.TrimSpace(line)
+		if !strings.Contains(line, "\t") {
+			return false
+		}
+		s := strings.Split(line, "\t")
+		if len(s) != 2 {
+			return false
+		}
+		if strings.HasSuffix(s[1], "/") {
+			return false
+		}
+		i--
+		if i == 0 {
+			break
+		}
 	}
-
-	// ipa_dict_txt has TAB followed by a slash; we avoid matching that here.
-	if bytes.Contains(sniff, []byte("\t/")) || bytes.Contains(sniff, []byte("\t /")) {
-		return false
-	}
-
-	lower := strings.ToLower(path)
-
-	// Strong hint from the file name: treat these as native text dictionaries.
-	if strings.HasSuffix(lower, ".txtipa") ||
-		strings.HasSuffix(lower, ".txt") ||
-		strings.HasSuffix(lower, ".ipa") {
-		return true
-	}
-
-	// Prefer this format when we see the " | " separator in valid UTF-8 text.
-	if utf8.Valid(sniff) && bytes.Contains(sniff, []byte(" | ")) {
-		return true
-	}
-
-	// Fallback: generic word<TAB>pronunciation lines in valid UTF-8 text.
-	if utf8.Valid(sniff) {
-		return true
-	}
-
-	// If the bytes are not valid UTF-8 and we have no strong path hint,
-	// let other preloaders (e.g. gob) try first.
-	return false
+	return true
 }
 
 // parseIPATextLine parses a single line of the native text format:
