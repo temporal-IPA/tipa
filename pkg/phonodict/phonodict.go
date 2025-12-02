@@ -56,23 +56,23 @@ func NewRepresentation() *Representation {
 	}
 }
 
-// PreloadKind identifies the "type" of preloader used.
+// Kind identifies the "type" of preloader used.
 // It is mostly informational but can be useful for debugging or
 // for selecting a particular preloader in user code.
-type PreloadKind string
+type Kind string
 
 const (
 	// PreloadKindGOB identifies a gob-encoded map[string][]string.
-	PreloadKindGOB PreloadKind = "ipa_gob"
+	PreloadKindGOB Kind = "ipa_gob"
 
-	// PreloadKindText identifies the "native" wikipa text format:
+	// PreloadKindTxtTipa identifies the "native" ipadict text format:
 	//   <word>\t<IPA1> | <IPA2> | ...
-	PreloadKindText PreloadKind = "ipa_text"
+	PreloadKindTxtTipa Kind = "txt_tipa"
 
-	// PreloadKindIPADictTxt identifies the external text format with
+	// PreloadKindTxtSlashedTipa identifies the external text format with
 	// slashed IPA, e.g.:
 	//   a\t/a/
-	PreloadKindIPADictTxt PreloadKind = "ipa_dict_txt"
+	PreloadKindTxtSlashedTipa Kind = "txt_slashed_tipa"
 )
 
 // OnEntryFunc is called by a Preloader for each dictionary entry
@@ -83,7 +83,7 @@ type OnEntryFunc func(word string, prons []string) error
 // (word, pronunciations) entries through the provided callback.
 type Preloader interface {
 	// Kind returns a short identifier for the preloader.
-	Kind() PreloadKind
+	Kind() Kind
 
 	// Sniff inspects a prefix of the input (sniff) and decides whether
 	// this preloader is appropriate for the source.
@@ -109,7 +109,7 @@ type LineParser func(line string) (word string, prons []string, err error)
 // This makes it easy to support additional textual formats (e.g. Lexique,
 // Flexique, custom tab-separated dictionaries).
 func NewLinePreloader(
-	kind PreloadKind,
+	kind Kind,
 	sniff func(path string, sniff []byte, isEOF bool) bool,
 	parser LineParser,
 ) Preloader {
@@ -123,12 +123,12 @@ func NewLinePreloader(
 // linePreloader is a generic implementation for textual formats where
 // each entry fits on a single line.
 type linePreloader struct {
-	kind      PreloadKind
+	kind      Kind
 	sniffFunc func(path string, sniff []byte, isEOF bool) bool
 	parseLine LineParser
 }
 
-func (p *linePreloader) Kind() PreloadKind { return p.kind }
+func (p *linePreloader) Kind() Kind { return p.kind }
 
 func (p *linePreloader) Sniff(path string, sniff []byte, isEOF bool) bool {
 	if p.sniffFunc == nil {
@@ -162,20 +162,42 @@ func (p *linePreloader) Load(path string, r io.Reader, emit OnEntryFunc) error {
 // gobPreloader handles gob-encoded map[string][]string dictionaries.
 type gobPreloader struct{}
 
-func (g *gobPreloader) Kind() PreloadKind { return PreloadKindGOB }
+// Kind reports the preloader kind identifier for gob dictionaries.
+func (g *gobPreloader) Kind() Kind { return PreloadKindGOB }
 
+// Sniff identifies gob payloads using filename hints and binary heuristics.
+//
+// Gob files are:
+//   - always selected when the path ends with ".gob";
+//   - never selected when the path looks like a text dictionary
+//     (".txt", ".txtipa", ".ipa");
+//   - otherwise, detected when the sniff bytes are not valid UTF-8 or contain
+//     NUL bytes. This avoids misclassifying regular text dictionaries as gob.
 func (g *gobPreloader) Sniff(path string, sniff []byte, isEOF bool) bool {
 	lower := strings.ToLower(path)
+
+	// If the path clearly looks like a text dictionary, never treat it as gob,
+	// even if the bytes look slightly odd.
+	if strings.HasSuffix(lower, ".txt") ||
+		strings.HasSuffix(lower, ".txtipa") ||
+		strings.HasSuffix(lower, ".ipa") {
+		return false
+	}
+
+	// Strong signal: explicit gob suffix.
 	if strings.HasSuffix(lower, ".gob") {
 		return true
 	}
+
 	if len(sniff) == 0 {
 		return false
 	}
+
 	// If it's not valid UTF-8, it's very likely a binary (gob) payload.
 	if !utf8.Valid(sniff) {
 		return true
 	}
+
 	// Heuristic: presence of NUL bytes strongly suggests a binary format.
 	for _, b := range sniff {
 		if b == 0 {
@@ -185,6 +207,7 @@ func (g *gobPreloader) Sniff(path string, sniff []byte, isEOF bool) bool {
 	return false
 }
 
+// Load decodes a gob-encoded map[string][]string and emits all entries.
 func (g *gobPreloader) Load(path string, r io.Reader, emit OnEntryFunc) error {
 	dec := gob.NewDecoder(r)
 	dict := make(map[string][]string)
@@ -241,17 +264,9 @@ func selectPreloader(path string, sniff []byte, isEOF bool) Preloader {
 // dictionary). These maps can be passed directly to the wikipa scanner.
 func PreloadPaths(mode MergeMode, paths ...string) (entries map[string][]string, seenWordPron map[string]struct{}, preloadedWords map[string]struct{}, err error) {
 	rep := NewRepresentation()
-
-	for _, p := range paths {
-		path := strings.TrimSpace(p)
-		if path == "" {
-			continue
-		}
-		if err := preloadFromFile(rep, path, mode); err != nil {
-			return nil, nil, nil, err
-		}
+	if err := PreloadInto(rep, mode, paths...); err != nil {
+		return nil, nil, nil, err
 	}
-
 	return rep.Entries, rep.SeenWordPron, rep.PreloadedWords, nil
 }
 
@@ -286,6 +301,30 @@ func PreloadBlobs(mode MergeMode, blobs ...[]byte) (entries map[string][]string,
 	}
 
 	return rep.Entries, rep.SeenWordPron, rep.PreloadedWords, nil
+}
+
+// PreloadInto preloads and merges dictionaries from a sequence of file paths
+// into an existing Representation.
+//
+// This is useful when you want to reuse a single Representation across
+// multiple sources (dumps, dictionaries, etc.) and keep consistent
+// merge semantics.
+func PreloadInto(rep *Representation, mode MergeMode, paths ...string) error {
+	if rep == nil {
+		rep = NewRepresentation()
+	}
+
+	for _, p := range paths {
+		path := strings.TrimSpace(p)
+		if path == "" {
+			continue
+		}
+		if err := preloadFromFile(rep, path, mode); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // preloadFromFile opens a file, sniffs its format and runs the matching preloader.
@@ -393,17 +432,14 @@ func runPreloader(pl Preloader, path string, mode MergeMode, r io.Reader, rep *R
 
 // --- Built-in text formats --------------------------------------------------
 
-// sniffIPADictTxt detects the ipa_dict_txt format, e.g.:
+// sniffTxtSlashedTipa detects the ipa_dict_txt format, e.g.:
 //
 //	a\t/a/
 //	à aucun moment\t/aokœ̃mɔmɑ̃/
 //
 // i.e. a tab, then an IPA string surrounded by slashes.
-func sniffIPADictTxt(path string, sniff []byte, isEOF bool) bool {
+func sniffTxtSlashedTipa(path string, sniff []byte, isEOF bool) bool {
 	if len(sniff) == 0 {
-		return false
-	}
-	if !utf8.Valid(sniff) {
 		return false
 	}
 	if !bytes.Contains(sniff, []byte("\t")) {
@@ -429,32 +465,50 @@ func sniffIPADictTxt(path string, sniff []byte, isEOF bool) bool {
 	return true
 }
 
-// sniffIPAText detects the native wikipa text format:
+// sniffTextTipa detects the native wikipa text format:
 //
 //	<word>\t<IPA1> | <IPA2> | ...
 //
 // It is deliberately permissive: as long as we see a tab and it does
-// not look like "tab + /", we treat it as ipa_text.
-func sniffIPAText(path string, sniff []byte, isEOF bool) bool {
+// not look like "tab + /", we treat it as ipa_text. Known text
+// extensions are treated as text even if the bytes are not strictly
+// valid UTF-8.
+func sniffTextTipa(path string, sniff []byte, isEOF bool) bool {
 	if len(sniff) == 0 {
 		return false
 	}
-	if !utf8.Valid(sniff) {
-		return false
-	}
+
 	if !bytes.Contains(sniff, []byte("\t")) {
 		return false
 	}
+
 	// ipa_dict_txt has TAB followed by a slash; we avoid matching that here.
 	if bytes.Contains(sniff, []byte("\t/")) || bytes.Contains(sniff, []byte("\t /")) {
 		return false
 	}
-	// Prefer this format when we see the " | " separator.
-	if bytes.Contains(sniff, []byte(" | ")) {
+
+	lower := strings.ToLower(path)
+
+	// Strong hint from the file name: treat these as native text dictionaries.
+	if strings.HasSuffix(lower, ".txtipa") ||
+		strings.HasSuffix(lower, ".txt") ||
+		strings.HasSuffix(lower, ".ipa") {
 		return true
 	}
-	// Fallback: generic word<TAB>pronunciation lines.
-	return true
+
+	// Prefer this format when we see the " | " separator in valid UTF-8 text.
+	if utf8.Valid(sniff) && bytes.Contains(sniff, []byte(" | ")) {
+		return true
+	}
+
+	// Fallback: generic word<TAB>pronunciation lines in valid UTF-8 text.
+	if utf8.Valid(sniff) {
+		return true
+	}
+
+	// If the bytes are not valid UTF-8 and we have no strong path hint,
+	// let other preloaders (e.g. gob) try first.
+	return false
 }
 
 // parseIPATextLine parses a single line of the native text format:
@@ -549,27 +603,25 @@ func parseIPADictTxtLine(line string) (string, []string, error) {
 }
 
 func init() {
-	// Register built-in preloaders in order of specificity:
-	//   1) gob
-	//   2) ipa_dict_txt
-	//   3) ipa_text (fallback for generic tab-separated text dictionaries)
-	textPreloader := NewLinePreloader(
-		PreloadKindText,
-		sniffIPAText,
-		parseIPATextLine,
-	)
-
-	dictTxtPreloader := NewLinePreloader(
-		PreloadKindIPADictTxt,
-		sniffIPADictTxt,
+	// Built-in preloaders, ordered from most specific to most generic.
+	textSlashed := NewLinePreloader(
+		PreloadKindTxtSlashedTipa,
+		sniffTxtSlashedTipa,
 		parseIPADictTxtLine,
 	)
+	textNative := NewLinePreloader(
+		PreloadKindTxtTipa,
+		sniffTextTipa,
+		parseIPATextLine,
+	)
+	gobPL := &gobPreloader{}
 
 	builtinPreloaders = []Preloader{
-		&gobPreloader{},
-		dictTxtPreloader,
-		textPreloader,
+		textSlashed,
+		textNative,
+		gobPL,
 	}
 
-	defaultPreloader = textPreloader
+	// Fallback to the native ipa text preloader when sniffing is inconclusive.
+	defaultPreloader = textNative
 }
