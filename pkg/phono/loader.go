@@ -9,27 +9,27 @@ import (
 )
 
 func init() {
-	// Built-in preloaders, ordered from most specific to most generic.
+	// Built-in loaders, ordered from most specific to most generic.
 	textSlashed := NewLineLoader(
-		KindTxtSlashedTipa,
-		sniffTxtSlashedTipa,
-		parseIPADictTxtLine,
+		KindTxtSlashedIpa,
+		sniffTxtSlashedIpa,
+		parseTxtSlashedIpaLine,
 	)
 	textNative := NewLineLoader(
-		KindTxtTipa,
-		sniffTextTipa,
-		parseIPATextLine,
+		KindTxtIpa,
+		sniffTextIpa,
+		parseTextIpaLine,
 	)
 	gobPL := &GobLoader{}
 
-	builtinPreloaders = []Loader{
+	builtinLoaders = []Loader{
 		textSlashed,
 		textNative,
 		gobPL,
 	}
 
 	// Fallback to the native ipa text preloader when sniffing is inconclusive.
-	defaultPreloader = textNative
+	defaultLoader = textNative
 }
 
 // OnEntryFunc is called by a Loader for each dictionary entry
@@ -58,30 +58,30 @@ type Loader interface {
 }
 
 var (
-	builtinPreloaders []Loader
-	defaultPreloader  Loader
+	builtinLoaders []Loader
+	defaultLoader  Loader
 )
 
-// RegisterPreloader allows external code to add additional Loaders
+// RegisterLoader allows external code to add additional Loaders
 // (for example Lexique, Flexique, etc.). Preloaders are consulted in
 // registration order during sniffing.
-func RegisterPreloader(p Loader) {
+func RegisterLoader(p Loader) {
 	if p == nil {
 		return
 	}
-	builtinPreloaders = append(builtinPreloaders, p)
+	builtinLoaders = append(builtinLoaders, p)
 }
 
 // selectLoader chooses the first preloader whose Sniff method returns true.
-// If none match, it falls back to defaultPreloader (the "native"
+// If none match, it falls back to defaultLoader (the "native"
 // text format).
 func selectLoader(sniff []byte, isEOF bool) Loader {
-	for _, p := range builtinPreloaders {
+	for _, p := range builtinLoaders {
 		if p.Sniff(sniff, isEOF) {
 			return p
 		}
 	}
-	return defaultPreloader
+	return defaultLoader
 }
 
 // LoadPaths preloads and merges dictionaries from a sequence of file paths.

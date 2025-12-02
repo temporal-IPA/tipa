@@ -1,7 +1,7 @@
-// Package parser provides sequential parsers for IPA-bearing sources
+// Package wikipedia provides sequential parsers for IPA-bearing sources
 // such as Wiktionary / Wikipedia XML dumps. Parsers operate in a
 // streaming fashion and emit entries into a shared phonodict.Representation.
-package parser
+package wikipedia
 
 import (
 	"bufio"
@@ -16,9 +16,177 @@ import (
 	"unicode"
 
 	"github.com/temporal-IPA/tipa/pkg/ipa"
-	"github.com/temporal-IPA/tipa/pkg/phonodict"
+	"github.com/temporal-IPA/tipa/pkg/phono"
 	"golang.org/x/net/html"
 )
+
+// XMLDump parses Wiktionary / Wikipedia XML dumps and merges the
+// extracted pronunciations into a phonodict.Representation.
+type XMLDump struct {
+	// Lang is the language code used in {{pron|...}} / {{API|...}} templates.
+	Lang string
+
+	// Mode controls how pronunciations from the dump are merged with any
+	// preloaded dictionaries in the Representation.
+	Mode phono.MergeMode
+
+	// Progress, if non-nil, is called periodically with the current
+	// line count, word count and unique (word, pron) pair count.
+	Progress func(lineCount int, wordCount int, uniquePairs int)
+}
+
+// NewXMLDump constructs a parser for the given language and merge mode.
+func NewXMLDump(lang string, mode phono.MergeMode) *XMLDump {
+	lang = strings.ToLower(strings.TrimSpace(lang))
+	if lang == "" {
+		lang = "fr"
+	}
+	return &XMLDump{
+		Lang: lang,
+		Mode: mode,
+	}
+}
+
+// ParseSource opens a local file or HTTP/HTTPS URL (optionally .bz2-compressed),
+// parses the dump and merges the entries into rep. It returns summary stats.
+func (p *XMLDump) ParseSource(pathOrURL string, rep *phono.Representation) (XMLWikipediaStats, error) {
+	if rep == nil {
+		rep = phono.NewRepresentation()
+	}
+
+	reader, err := openSource(pathOrURL)
+	if err != nil {
+		return XMLWikipediaStats{}, fmt.Errorf("open %q: %w", pathOrURL, err)
+	}
+	defer reader.Close()
+
+	return p.Parse(reader, rep)
+}
+
+// Parse reads a dump from reader, updating rep in place.
+//
+// rep may already contain entries and preloaded words; merge semantics
+// follow p.Mode and are consistent with phonodict's merge logic.
+func (p *XMLDump) Parse(reader io.Reader, rep *phono.Representation) (XMLWikipediaStats, error) {
+	if rep == nil {
+		rep = phono.NewRepresentation()
+	}
+
+	stats := XMLWikipediaStats{}
+	start := time.Now()
+
+	scanner := bufio.NewScanner(reader)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 4*1024*1024)
+
+	var (
+		title  string
+		inText bool
+	)
+
+	const progressStep = 100000
+
+	replaced := make(map[string]struct{})
+
+	lang := strings.ToLower(strings.TrimSpace(p.Lang))
+	if lang == "" {
+		lang = "fr"
+	}
+
+	mode := p.Mode
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		stats.Lines++
+
+		if p.Progress != nil && stats.Lines%progressStep == 0 {
+			p.Progress(stats.Lines, len(rep.Entries), len(rep.SeenWordPron))
+		}
+
+		if strings.Contains(line, "<title>") && strings.Contains(line, "</title>") {
+			trim := strings.TrimSpace(line)
+			if strings.HasPrefix(trim, "<title>") && strings.Contains(trim, "</title>") {
+				startIdx := strings.Index(trim, "<title>") + len("<title>")
+				endIdx := strings.Index(trim, "</title>")
+				if endIdx > startIdx {
+					title = trim[startIdx:endIdx]
+				}
+			}
+		}
+
+		if strings.Contains(line, "<text") {
+			inText = true
+		}
+		if strings.Contains(line, "</text>") {
+			inText = false
+		}
+
+		if !inText {
+			continue
+		}
+
+		if !strings.Contains(line, "{{pron|") && !strings.Contains(line, "{{API|") {
+			continue
+		}
+
+		word := extractHeadwordFromLine(line, title)
+		if word == "" {
+			continue
+		}
+
+		if mode == phono.MergeModeNoOverride {
+			if _, pre := rep.PreloadedWords[word]; pre {
+				continue
+			}
+		}
+
+		prons := extractPronunciationsFromLine(line, lang)
+		if len(prons) == 0 {
+			continue
+		}
+
+		if mode == phono.MergeModeReplace {
+			if _, pre := rep.PreloadedWords[word]; pre {
+				if _, already := replaced[word]; !already {
+					baseKey := word + "\x00"
+					for _, old := range rep.Entries[word] {
+						delete(rep.SeenWordPron, baseKey+old)
+					}
+					rep.Entries[word] = nil
+					replaced[word] = struct{}{}
+				}
+			}
+		}
+
+		baseKey := word + "\x00"
+		for _, pron := range prons {
+			key := baseKey + pron
+			if _, ok := rep.SeenWordPron[key]; ok {
+				continue
+			}
+			rep.SeenWordPron[key] = struct{}{}
+
+			switch mode {
+			case phono.MergeModePrepend:
+				rep.Entries[word] = append([]string{pron}, rep.Entries[word]...)
+			default:
+				rep.Entries[word] = append(rep.Entries[word], pron)
+			}
+		}
+	}
+
+	stats.Words = len(rep.Entries)
+	stats.UniquePairs = len(rep.SeenWordPron)
+	stats.Elapsed = time.Since(start)
+
+	if err := scanner.Err(); err != nil {
+		return stats, err
+	}
+
+	return stats, nil
+}
+
+// --- Generic helpers --------------------------------------------------------
 
 // --- Regexes used by the XML dump parser -----------------------------------
 
@@ -54,8 +222,6 @@ var replace = []string{
 }
 
 var replacer = strings.NewReplacer(replace...)
-
-// --- Generic helpers --------------------------------------------------------
 
 // openLocalPossiblyCompressed opens a local file and wraps it in a bzip2
 // decompressor when the path ends with ".bz2". The returned ReadCloser always
@@ -275,170 +441,4 @@ type XMLWikipediaStats struct {
 	Words       int
 	UniquePairs int
 	Elapsed     time.Duration
-}
-
-// XMLWikipediaDump parses Wiktionary / Wikipedia XML dumps and merges the
-// extracted pronunciations into a phonodict.Representation.
-type XMLWikipediaDump struct {
-	// Lang is the language code used in {{pron|...}} / {{API|...}} templates.
-	Lang string
-
-	// Mode controls how pronunciations from the dump are merged with any
-	// preloaded dictionaries in the Representation.
-	Mode phono.MergeMode
-
-	// Progress, if non-nil, is called periodically with the current
-	// line count, word count and unique (word, pron) pair count.
-	Progress func(lineCount int, wordCount int, uniquePairs int)
-}
-
-// NewXMLWikipediaDump constructs a parser for the given language and merge mode.
-func NewXMLWikipediaDump(lang string, mode phono.MergeMode) *XMLWikipediaDump {
-	lang = strings.ToLower(strings.TrimSpace(lang))
-	if lang == "" {
-		lang = "fr"
-	}
-	return &XMLWikipediaDump{
-		Lang: lang,
-		Mode: mode,
-	}
-}
-
-// ParseSource opens a local file or HTTP/HTTPS URL (optionally .bz2-compressed),
-// parses the dump and merges the entries into rep. It returns summary stats.
-func (p *XMLWikipediaDump) ParseSource(pathOrURL string, rep *phono.Representation) (XMLWikipediaStats, error) {
-	if rep == nil {
-		rep = phono.NewRepresentation()
-	}
-
-	reader, err := openSource(pathOrURL)
-	if err != nil {
-		return XMLWikipediaStats{}, fmt.Errorf("open %q: %w", pathOrURL, err)
-	}
-	defer reader.Close()
-
-	return p.Parse(reader, rep)
-}
-
-// Parse reads a dump from reader, updating rep in place.
-//
-// rep may already contain entries and preloaded words; merge semantics
-// follow p.Mode and are consistent with phonodict's merge logic.
-func (p *XMLWikipediaDump) Parse(reader io.Reader, rep *phono.Representation) (XMLWikipediaStats, error) {
-	if rep == nil {
-		rep = phono.NewRepresentation()
-	}
-
-	stats := XMLWikipediaStats{}
-	start := time.Now()
-
-	scanner := bufio.NewScanner(reader)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 4*1024*1024)
-
-	var (
-		title  string
-		inText bool
-	)
-
-	const progressStep = 100000
-
-	replaced := make(map[string]struct{})
-
-	lang := strings.ToLower(strings.TrimSpace(p.Lang))
-	if lang == "" {
-		lang = "fr"
-	}
-
-	mode := p.Mode
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		stats.Lines++
-
-		if p.Progress != nil && stats.Lines%progressStep == 0 {
-			p.Progress(stats.Lines, len(rep.Entries), len(rep.SeenWordPron))
-		}
-
-		if strings.Contains(line, "<title>") && strings.Contains(line, "</title>") {
-			trim := strings.TrimSpace(line)
-			if strings.HasPrefix(trim, "<title>") && strings.Contains(trim, "</title>") {
-				startIdx := strings.Index(trim, "<title>") + len("<title>")
-				endIdx := strings.Index(trim, "</title>")
-				if endIdx > startIdx {
-					title = trim[startIdx:endIdx]
-				}
-			}
-		}
-
-		if strings.Contains(line, "<text") {
-			inText = true
-		}
-		if strings.Contains(line, "</text>") {
-			inText = false
-		}
-
-		if !inText {
-			continue
-		}
-
-		if !strings.Contains(line, "{{pron|") && !strings.Contains(line, "{{API|") {
-			continue
-		}
-
-		word := extractHeadwordFromLine(line, title)
-		if word == "" {
-			continue
-		}
-
-		if mode == phono.MergeModeNoOverride {
-			if _, pre := rep.PreloadedWords[word]; pre {
-				continue
-			}
-		}
-
-		prons := extractPronunciationsFromLine(line, lang)
-		if len(prons) == 0 {
-			continue
-		}
-
-		if mode == phono.MergeModeReplace {
-			if _, pre := rep.PreloadedWords[word]; pre {
-				if _, already := replaced[word]; !already {
-					baseKey := word + "\x00"
-					for _, old := range rep.Entries[word] {
-						delete(rep.SeenWordPron, baseKey+old)
-					}
-					rep.Entries[word] = nil
-					replaced[word] = struct{}{}
-				}
-			}
-		}
-
-		baseKey := word + "\x00"
-		for _, pron := range prons {
-			key := baseKey + pron
-			if _, ok := rep.SeenWordPron[key]; ok {
-				continue
-			}
-			rep.SeenWordPron[key] = struct{}{}
-
-			switch mode {
-			case phono.MergeModePrepend:
-				rep.Entries[word] = append([]string{pron}, rep.Entries[word]...)
-			default:
-				rep.Entries[word] = append(rep.Entries[word], pron)
-			}
-		}
-	}
-
-	stats.Words = len(rep.Entries)
-	stats.UniquePairs = len(rep.SeenWordPron)
-	stats.Elapsed = time.Since(start)
-
-	if err := scanner.Err(); err != nil {
-		return stats, err
-	}
-
-	return stats, nil
 }
