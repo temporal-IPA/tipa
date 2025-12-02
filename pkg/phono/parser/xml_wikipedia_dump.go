@@ -1,7 +1,7 @@
-// Package seqparser provides sequential parsers for IPA-bearing sources
+// Package parser provides sequential parsers for IPA-bearing sources
 // such as Wiktionary / Wikipedia XML dumps. Parsers operate in a
 // streaming fashion and emit entries into a shared phonodict.Representation.
-package seqparser
+package parser
 
 import (
 	"bufio"
@@ -285,7 +285,7 @@ type XMLWikipediaDump struct {
 
 	// Mode controls how pronunciations from the dump are merged with any
 	// preloaded dictionaries in the Representation.
-	Mode phonodict.MergeMode
+	Mode phono.MergeMode
 
 	// Progress, if non-nil, is called periodically with the current
 	// line count, word count and unique (word, pron) pair count.
@@ -293,7 +293,7 @@ type XMLWikipediaDump struct {
 }
 
 // NewXMLWikipediaDump constructs a parser for the given language and merge mode.
-func NewXMLWikipediaDump(lang string, mode phonodict.MergeMode) *XMLWikipediaDump {
+func NewXMLWikipediaDump(lang string, mode phono.MergeMode) *XMLWikipediaDump {
 	lang = strings.ToLower(strings.TrimSpace(lang))
 	if lang == "" {
 		lang = "fr"
@@ -306,9 +306,9 @@ func NewXMLWikipediaDump(lang string, mode phonodict.MergeMode) *XMLWikipediaDum
 
 // ParseSource opens a local file or HTTP/HTTPS URL (optionally .bz2-compressed),
 // parses the dump and merges the entries into rep. It returns summary stats.
-func (p *XMLWikipediaDump) ParseSource(pathOrURL string, rep *phonodict.Representation) (XMLWikipediaStats, error) {
+func (p *XMLWikipediaDump) ParseSource(pathOrURL string, rep *phono.Representation) (XMLWikipediaStats, error) {
 	if rep == nil {
-		rep = phonodict.NewRepresentation()
+		rep = phono.NewRepresentation()
 	}
 
 	reader, err := openSource(pathOrURL)
@@ -324,9 +324,9 @@ func (p *XMLWikipediaDump) ParseSource(pathOrURL string, rep *phonodict.Represen
 //
 // rep may already contain entries and preloaded words; merge semantics
 // follow p.Mode and are consistent with phonodict's merge logic.
-func (p *XMLWikipediaDump) Parse(reader io.Reader, rep *phonodict.Representation) (XMLWikipediaStats, error) {
+func (p *XMLWikipediaDump) Parse(reader io.Reader, rep *phono.Representation) (XMLWikipediaStats, error) {
 	if rep == nil {
-		rep = phonodict.NewRepresentation()
+		rep = phono.NewRepresentation()
 	}
 
 	stats := XMLWikipediaStats{}
@@ -391,7 +391,7 @@ func (p *XMLWikipediaDump) Parse(reader io.Reader, rep *phonodict.Representation
 			continue
 		}
 
-		if mode == phonodict.MergeModeNoOverride {
+		if mode == phono.MergeModeNoOverride {
 			if _, pre := rep.PreloadedWords[word]; pre {
 				continue
 			}
@@ -402,7 +402,7 @@ func (p *XMLWikipediaDump) Parse(reader io.Reader, rep *phonodict.Representation
 			continue
 		}
 
-		if mode == phonodict.MergeModeReplace {
+		if mode == phono.MergeModeReplace {
 			if _, pre := rep.PreloadedWords[word]; pre {
 				if _, already := replaced[word]; !already {
 					baseKey := word + "\x00"
@@ -424,7 +424,7 @@ func (p *XMLWikipediaDump) Parse(reader io.Reader, rep *phonodict.Representation
 			rep.SeenWordPron[key] = struct{}{}
 
 			switch mode {
-			case phonodict.MergeModePrepend:
+			case phono.MergeModePrepend:
 				rep.Entries[word] = append([]string{pron}, rep.Entries[word]...)
 			default:
 				rep.Entries[word] = append(rep.Entries[word], pron)
