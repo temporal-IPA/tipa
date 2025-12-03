@@ -10,33 +10,107 @@ import (
 	"github.com/temporal-IPA/tipa/pkg/phono"
 )
 
+// Determinist is a determinist g2p processor based on dictionaries.
+// It applies brut force strategies to transform a text to Phonetic.
+// The intelligence is mostly located the phonetic dictionary data.
+// We use two dictionaries per language:
+// - A large one that covers most of the target (e.g.: more than 1,7 million entries for the French)
+// - A small one that is used to fill the holes providing a pseudo pronunciation for letters, syllabus and small chunk.
 type Determinist struct {
-	dictionary phono.Dictionary
-	normalized map[string][]string
-	maxKeyLen  int
-	tolerant   bool
+	langDict            phono.Dictionary // A large phonetic dictionary for a given language.
+	langDictNormKeyMap  phono.KeyMap     // + the lang phonetic dictionary normalized key map
+	finalDict           phono.Dictionary // A special phonetic dictionary that contains short character sequences to fill holes
+	finalDictNormKeyMap phono.KeyMap     // + the final phonetic dictionary normalized key map
 }
 
-func NewDeterminist(dictionary phono.Dictionary, tolerant bool) *Determinist {
-	normalized := dictionary.NormalizedKeys()
+// NewDeterminist creates a new Determinist g2p processor instance.
+func NewDeterminist(langDict phono.Dictionary, final phono.Dictionary) *Determinist {
 	maxKeyLen := 0
-	for key := range normalized {
+	for key := range langDict {
 		if l := utf8.RuneCountInString(key); l > maxKeyLen {
 			maxKeyLen = l
 		}
 	}
 	g := &Determinist{
-		dictionary: dictionary,
-		normalized: normalized,
-		maxKeyLen:  maxKeyLen,
-		tolerant:   tolerant,
+		langDict:            langDict,
+		langDictNormKeyMap:  langDict.NormalizedKeys(),
+		finalDict:           final,
+		finalDictNormKeyMap: final.NormalizedKeys(),
 	}
 	return g
 }
 
-// Scan is a brute‑force scanner that walks the input text from left to
+// Scan a text.
+func (d Determinist) Scan(text string, tolerant bool) Result {
+
+	////////////////////////////////////////
+	// #1 Scan the text using the langDict.
+	// This is the most important phase.
+	// A very adapted dict should not return a lot of raw texts.
+	////////////////////////////////////////
+
+	fragments, rawTexts := d.scan(text, d.langDict, d.langDictNormKeyMap, tolerant)
+
+	////////////////////////////////////////////
+	// #2 Scan the remaining raw texts with the final dictionary.
+	// Each raw text is rescanned and can generate:
+	//   - additional fragments (subFragments)
+	//   - new raw texts (subRawTexts) that replace the original raw segment
+	////////////////////////////////////////////
+	var finalFragments []Fragment
+	var finalRawText []RawText
+
+	// The second stage only runs if there are raw texts and a finalDict.
+	if len(rawTexts) > 0 && d.finalDict != nil {
+		// Start from the fragments already found in phase #1.
+		finalFragments = fragments
+
+		// finalRawText will be rebuilt from the rawTexts slice,
+		// replacing each original RawText by its eventual subRawTexts.
+		finalRawText = make([]RawText, 0, len(rawTexts))
+
+		// Scan each raw text with the final dictionary.
+		for _, rawText := range rawTexts {
+			subFragments, subRawTexts := d.scan(rawText.Text, d.finalDict, d.finalDictNormKeyMap, tolerant)
+
+			// If some fragments are found inside this raw text,
+			// add them to the final fragment list with adjusted positions.
+			if len(subFragments) > 0 {
+				for _, sub := range subFragments {
+					// Readjust the sub fragment positions to match the original text position.
+					sub.Pos = rawText.Pos + sub.Pos
+					finalFragments = append(finalFragments, sub)
+				}
+			}
+
+			// If the second scan still has raw texts, they replace the original rawText.
+			if len(subRawTexts) > 0 {
+				for _, sub := range subRawTexts {
+					// Readjust the sub raw text positions to match the original text position.
+					sub.Pos = rawText.Pos + sub.Pos
+					finalRawText = append(finalRawText, sub)
+				}
+			} else {
+				// No better decomposition was found for this raw text,
+				// so keep the original one.
+				finalRawText = append(finalRawText, rawText)
+			}
+		}
+	} else {
+		// No second stage: keep the initial scan result as-is.
+		finalFragments = fragments
+		finalRawText = rawTexts
+	}
+
+	return Result{
+		Fragments: finalFragments,
+		RawTexts:  finalRawText,
+	}
+}
+
+// scan is a brute‑force scanner that walks the input text from left to
 // right and greedily selects, at each position, the longest dictionary
-// entry that matches the text.
+// key that matches the text.
 //
 // The scan operates on Unicode code points (runes). Fragment.Pos and
 // Fragment.Len (as well as RawText.Pos and RawText.Len) are expressed
@@ -45,31 +119,25 @@ func NewDeterminist(dictionary phono.Dictionary, tolerant bool) *Determinist {
 // The algorithm runs in one or two passes:
 //
 //   - First pass (always enabled): the text is scanned using the
-//     dictionary keys normalized with phono.NormalizeString. Every
+//     langDict keys langDictNormKeyMap with phono.NormalizeString. Every
 //     successful match produces a Fragment. Any text that cannot be
 //     matched is emitted as RawText.
 //
 //   - Second pass (tolerant mode only): the RawText ranges from the
 //     first pass are scanned again using a more tolerant normalization
-//     that additionally strips diacritic marks from both the dictionary
+//     that additionally strips diacritic marks from both the langDict
 //     keys and the candidate substrings. This allows, for example,
-//     matching "garcon" against a dictionary entry "garçon". RawText
+//     matching "garcon" against a langDict entry "garçon". RawText
 //     segments that are still unmatched after this pass are kept as-is.
 //
 // For every contiguous piece of unmatched text at most one RawText is
 // returned: neighbouring RawText blocks are merged together.
-func (g Determinist) Scan(text string) ([]Fragment, []RawText) {
-	// Strict pass.
-	fragments, rawTexts := g.scanSegment(
-		text,
-		0,
-		g.normalized,
-		phono.NormalizeString,
-		1.0,
-	)
+func (d Determinist) scan(text string, dictionary phono.Dictionary, normKeyMap phono.KeyMap, tolerant bool) ([]Fragment, []RawText) {
 
-	// If tolerant mode is disabled or everything was recognized, we are done.
-	if !g.tolerant || len(rawTexts) == 0 {
+	// Strict pass.
+	fragments, rawTexts := d.scanSegment(text, 0, dictionary, normKeyMap, phono.NormalizeString, 1.0)
+	// If the tolerant mode is disabled or everything was recognized, we are done.
+	if !tolerant || len(rawTexts) == 0 {
 		sort.Slice(fragments, func(i, j int) bool {
 			if fragments[i].Pos == fragments[j].Pos {
 				return fragments[i].Len > fragments[j].Len
@@ -80,23 +148,16 @@ func (g Determinist) Scan(text string) ([]Fragment, []RawText) {
 		return fragments, rawTexts
 	}
 
-	// Build a diacritic-insensitive view of the dictionary and re-process
+	// Build a diacritic-insensitive view of the langDict and re-process
 	// unrecognized spans.
-	tolerantNormalized := g.buildTolerantNormalized()
-
+	tolerantNormalized := d.buildDiacriticInsensitiveKeyMap(normKeyMap)
 	tolerantFragments := make([]Fragment, 0, len(fragments))
 	tolerantFragments = append(tolerantFragments, fragments...)
-
 	tolerantRawTexts := make([]RawText, 0, len(rawTexts))
 
 	for _, rt := range rawTexts {
-		segFrags, segRaws := g.scanSegment(
-			rt.Text,
-			rt.Pos,
-			tolerantNormalized,
-			tolerantNormalize,
-			0.9, // slightly lower confidence for tolerant matches
-		)
+		// slightly lower confidence for tolerant matches
+		segFrags, segRaws := d.scanSegment(rt.Text, rt.Pos, dictionary, tolerantNormalized, tolerantNormalize, 0.9)
 		if len(segFrags) == 0 {
 			// Nothing could be recognized in tolerant mode, keep the
 			// original raw block.
@@ -119,27 +180,19 @@ func (g Determinist) Scan(text string) ([]Fragment, []RawText) {
 }
 
 // scanSegment performs a greedy, longest-match scan of a single text
-// segment using the provided normalization function and dictionary
+// segment using the provided normalization function and langDict
 // view. The offset parameter indicates the rune position of the first
 // rune of text within the original input string.
-func (g Determinist) scanSegment(
-	text string,
-	offset int,
-	normalized map[string][]string,
-	normalizeCandidate func(string) string,
-	confidence float64,
-) ([]Fragment, []RawText) {
+func (d Determinist) scanSegment(text string, offset int, dictionary phono.Dictionary, normalized phono.KeyMap, normalizeCandidate func(string) string, confidence float64) ([]Fragment, []RawText) {
 	runes := []rune(text)
 	n := len(runes)
 	fragments := make([]Fragment, 0)
 	rawTexts := make([]RawText, 0)
-
+	maxLen := dictionary.MaxKeyLen()
 	currentRawStart := -1
-
 	for i := 0; i < n; {
 		// Do not attempt to search longer keys than both the configured
 		// maximum and the remaining number of runes in this segment.
-		maxLen := g.maxKeyLen
 		remaining := n - i
 		if maxLen > remaining {
 			maxLen = remaining
@@ -164,7 +217,7 @@ func (g Determinist) scanSegment(
 				currentRawStart = -1
 			}
 
-			ipa := g.pickIPA(keys, candidate)
+			ipa := d.pickIPA(dictionary, keys, candidate)
 
 			fragments = append(fragments, Fragment{
 				IPA:        ipa,
@@ -179,7 +232,7 @@ func (g Determinist) scanSegment(
 		}
 
 		if !found {
-			// No dictionary entry begins at this rune: mark / extend raw text.
+			// No langDict entry begins at this rune: mark / extend raw text.
 			if currentRawStart == -1 {
 				currentRawStart = i
 			}
@@ -200,51 +253,47 @@ func (g Determinist) scanSegment(
 }
 
 // pickIPA selects the IPA transcription associated with one of the
-// dictionary keys that matched a given surface form. It currently
-// returns the first pronunciation of the first key whose normalized
+// langDict keys that matched a given surface form. It currently
+// returns the first pronunciation of the first key whose langDictNormKeyMap
 // form matches the surface; if none match exactly, it falls back to
 // the first key that has at least one pronunciation.
-func (g Determinist) pickIPA(candidateKeys []string, surface string) phono.IPA {
+func (d Determinist) pickIPA(dict phono.Dictionary, candidateKeys []string, surface string) phono.IPA {
 	if len(candidateKeys) == 0 {
 		return ""
 	}
-
 	normalizedSurface := phono.NormalizeString(surface)
-
-	// Prefer keys whose normalized form is identical to the surface.
+	// Prefer keys whose langDictNormKeyMap form is identical to the surface.
 	for _, k := range candidateKeys {
 		if phono.NormalizeString(k) == normalizedSurface {
-			if prons := g.dictionary[k]; len(prons) > 0 {
+			if prons := dict[k]; len(prons) > 0 {
 				return prons[0]
 			}
 		}
 	}
-
 	// Fallback: first key that has at least one pronunciation.
 	for _, k := range candidateKeys {
-		if prons := g.dictionary[k]; len(prons) > 0 {
+		if prons := dict[k]; len(prons) > 0 {
 			return prons[0]
 		}
 	}
-
 	return ""
 }
 
-// buildTolerantNormalized constructs a diacritic-insensitive view of
-// the dictionary keys. Multiple normalized keys can map to the same
+// buildDiacriticInsensitiveKeyMap constructs a diacritic-insensitive view of
+// the langDict keys. Multiple langDictNormKeyMap keys can map to the same
 // tolerant key; in that case, their original spellings are concatenated.
-func (g Determinist) buildTolerantNormalized() map[string][]string {
-	tolerant := make(map[string][]string, len(g.normalized))
-	for normKey, keys := range g.normalized {
+func (d Determinist) buildDiacriticInsensitiveKeyMap(keyMap phono.KeyMap) phono.KeyMap {
+	tolerant := make(phono.KeyMap, len(keyMap))
+	for normKey, keys := range keyMap {
 		tKey := tolerantNormalize(normKey)
 		tolerant[tKey] = append(tolerant[tKey], keys...)
 	}
 	return tolerant
 }
 
-// tolerantNormalize applies the standard dictionary normalization and
+// tolerantNormalize applies the standard langDict normalization and
 // additionally strips diacritic marks. It is used both when building
-// the tolerant dictionary view and when normalizing candidate substrings.
+// the tolerant langDict view and when normalizing candidate substrings.
 func tolerantNormalize(s string) string {
 	return phono.NormalizeString(removeDiacritics(s))
 }
@@ -268,7 +317,7 @@ func removeDiacritics(s string) string {
 }
 
 // mergeRawTexts merges adjacent RawText entries that represent
-// consecutive ranges in the original text (i.e. where previous.Pos +
+// consecutive ranges in the original text (i.e., where previous.Pos +
 // previous.Len == next.Pos). The input slice is not assumed to be
 // ordered; it is sorted by Pos before merging.
 func mergeRawTexts(raws []RawText) []RawText {

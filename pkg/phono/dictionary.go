@@ -4,7 +4,10 @@
 // for line-based textual preloaders.
 package phono
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // Expression is a sequence of grapheme encode as an UTF8 string.
 type Expression = string
@@ -32,9 +35,11 @@ func NewRepresentation() *Representation {
 	}
 }
 
+type KeyMap map[string][]string
+
 // NormalizedKeys returns a dictionary with all the corresponding keys for a given normalized key.
-func (d Dictionary) NormalizedKeys() map[string][]string {
-	keys := make(map[string][]string)
+func (d Dictionary) NormalizedKeys() KeyMap {
+	keys := make(KeyMap)
 	i := 0
 	for k, _ := range d {
 		lk := NormalizeString(k)
@@ -45,6 +50,16 @@ func (d Dictionary) NormalizedKeys() map[string][]string {
 		i++
 	}
 	return keys
+}
+
+func (d Dictionary) MaxKeyLen() int {
+	maxKeyLen := 0
+	for key := range d {
+		if l := utf8.RuneCountInString(key); l > maxKeyLen {
+			maxKeyLen = l
+		}
+	}
+	return maxKeyLen
 }
 
 // NormalizeString is the func used to normalize the keys.
