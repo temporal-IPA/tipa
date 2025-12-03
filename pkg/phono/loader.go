@@ -91,22 +91,21 @@ func selectLoader(sniff []byte, isEOF bool) Loader {
 //
 // It returns the combined internal representation: entries, seenWordPron
 // and preloadedWords (the set of words that originate from any preloaded
-// dictionary). These maps can be passed directly to the wikipa scanner.
-func LoadPaths(fs fs.FS, mode MergeMode, paths ...string) (entries map[string][]string, seenWordPron map[string]struct{}, preloadedWords map[string]struct{}, err error) {
+// dictionary).
+func LoadPaths(fs fs.FS, mode MergeMode, paths ...string) (Dictionary, error) {
 	rep := NewRepresentation()
 	if err := LoadInto(fs, rep, mode, paths...); err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
-	return rep.Entries, rep.SeenWordPron, rep.PreloadedWords, nil
+	return rep.Entries, nil
 }
 
 // LoadBlobs preloads and merges dictionaries from in‑memory byte slices.
 //
 // Each blob is treated like a separate source, and MergeMode is applied
 // between these sources in the same way as for files.
-func LoadBlobs(mode MergeMode, blobs ...[]byte) (entries map[string][]string, seenWordPron map[string]struct{}, preloadedWords map[string]struct{}, err error) {
+func LoadBlobs(mode MergeMode, blobs ...[]byte) (Dictionary, error) {
 	rep := NewRepresentation()
-
 	for _, blob := range blobs {
 		if len(blob) == 0 {
 			continue
@@ -119,11 +118,11 @@ func LoadBlobs(mode MergeMode, blobs ...[]byte) (entries map[string][]string, se
 		}
 		pl := selectLoader(sniff, isEOF)
 		if err := runLoader(pl, mode, bytes.NewReader(blob), rep); err != nil {
-			return nil, nil, nil, err
+			return nil, err
 		}
 	}
 
-	return rep.Entries, rep.SeenWordPron, rep.PreloadedWords, nil
+	return rep.Entries, nil
 }
 
 // LoadInto preloads and merges dictionaries from a sequence of file paths
