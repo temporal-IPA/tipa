@@ -16,6 +16,7 @@ type RawText struct {
 }
 
 type Result struct {
+	Text      string     `json:"text"` // The original text.
 	Fragments []Fragment `json:"fragments"`
 	RawTexts  []RawText  `json:"raw_texts"`
 }

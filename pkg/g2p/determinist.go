@@ -201,6 +201,7 @@ func (d Determinist) Scan(text string, tolerant bool) Result {
 	finalRawText = mergeRawTexts(finalRawText)
 
 	return Result{
+		Text:      text,
 		Fragments: finalFragments,
 		RawTexts:  finalRawText,
 	}
