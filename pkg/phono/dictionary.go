@@ -15,6 +15,8 @@ type Expression = string
 // IPA is an international phonetic alphabet composed string.
 type IPA = string
 
+type Phonetized = string
+
 type Dictionary map[Expression][]IPA
 
 // Representation holds the internal dictionary representation used
@@ -37,21 +39,20 @@ func NewRepresentation() *Representation {
 
 type KeyMap map[string][]string
 
-// NormalizedKeys returns a dictionary with all the corresponding keys for a given normalized key.
+// NormalizedKeys returns a dictionary with all the corresponding keys
+// for a given normalized key (NormalizeString view).
 func (d Dictionary) NormalizedKeys() KeyMap {
 	keys := make(KeyMap)
-	i := 0
-	for k, _ := range d {
+	for k := range d {
 		lk := NormalizeString(k)
-		if _, ok := keys[lk]; !ok {
-			keys[lk] = make([]string, 0)
-		}
 		keys[lk] = append(keys[lk], k)
-		i++
 	}
 	return keys
 }
 
+// MaxKeyLen returns the maximum key length in runes. It is used by the
+// scanner to bound the size of candidate substrings when performing
+// greedy longest‑match scans.
 func (d Dictionary) MaxKeyLen() int {
 	maxKeyLen := 0
 	for key := range d {
