@@ -26,7 +26,7 @@ type FrenchLiaisonProcessor struct {
 	adjectivesT  map[string]struct{}
 	pronounsZ    map[string]struct{}
 	pronounsN    map[string]struct{}
-	pronounsT    map[string]struct{}
+	verbsT       map[string]struct{}
 	adverbsZ     map[string]struct{} // e.g. très
 	adverbsP     map[string]struct{} // e.g. trop
 
@@ -74,8 +74,7 @@ func newFrenchLiaisonProcessor(allowLoose bool) *FrenchLiaisonProcessor {
 	p.pronounsN = makeNormalizedSet([]string{
 		"en", "on",
 	})
-	// Todo c'est n'importe quoi chat gpt pro !!!!!
-	p.pronounsT = makeNormalizedSet([]string{
+	p.verbsT = makeNormalizedSet([]string{
 		"est", "sont", "ait", "était", "étaient",
 	})
 	// Optional extras: très + ADJ (z), trop + ADJ (p).
@@ -367,7 +366,7 @@ func (p *FrenchLiaisonProcessor) isLiaisonGiver(norm string) bool {
 	if _, ok := p.pronounsN[norm]; ok {
 		return true
 	}
-	if _, ok := p.pronounsT[norm]; ok {
+	if _, ok := p.verbsT[norm]; ok {
 		return true
 	}
 	if _, ok := p.adverbsZ[norm]; ok {
@@ -410,7 +409,7 @@ func (p *FrenchLiaisonProcessor) guessLiaisonPhone(word string) string {
 	if _, ok := p.adjectivesT[lower]; ok {
 		return "t"
 	}
-	if _, ok := p.pronounsT[lower]; ok {
+	if _, ok := p.verbsT[lower]; ok {
 		return "t"
 	}
 

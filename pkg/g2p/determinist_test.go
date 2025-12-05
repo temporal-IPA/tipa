@@ -26,12 +26,12 @@ func TestScanProgressiveThroughUnknownChunk(t *testing.T) {
 
 	// Fragments should cover "Le" and "Benoit" in order.
 	frag0 := res.Fragments[0]
-	if frag0.IPA != "lə" || frag0.Pos != 0 || frag0.Len != 3 {
+	if frag0.Phonetized != "lə" || frag0.Pos != 0 || frag0.Len != 2 {
 		t.Errorf("unexpected first fragment: %+v", frag0)
 	}
 
 	frag1 := res.Fragments[1]
-	if frag1.IPA != "bənwa" || frag1.Pos != 7 || frag1.Len != 6 {
+	if frag1.Phonetized != "bənwa" || frag1.Pos != 7 || frag1.Len != 6 {
 		t.Errorf("unexpected second fragment: %+v", frag1)
 	}
 
@@ -41,7 +41,7 @@ func TestScanProgressiveThroughUnknownChunk(t *testing.T) {
 
 	raw := res.RawTexts[0]
 	// The raw block contains the space before "Gros" and the unknown word itself.
-	if raw.Text != "Gros" || raw.Pos != 3 || raw.Len != 4 {
+	if raw.Text != " Gros" || raw.Pos != 2 || raw.Len != 5 {
 		t.Errorf("unexpected raw text: %+v", raw)
 	}
 }
@@ -72,7 +72,7 @@ func TestScanTolerantDiacritics(t *testing.T) {
 	}
 
 	frag := tolerant.Fragments[0]
-	if frag.IPA != "garsɔ̃" || frag.Pos != 0 || frag.Len != 6 {
+	if frag.Phonetized != "garsɔ̃" || frag.Pos != 0 || frag.Len != 6 {
 		t.Errorf("unexpected tolerant fragment: %+v", frag)
 	}
 	if len(tolerant.RawTexts) != 0 {
@@ -106,7 +106,7 @@ func TestScanUsesFinalDictionary(t *testing.T) {
 	wantLen := []int{3, 3, 3}
 
 	for i, f := range res.Fragments {
-		if f.IPA != wantIPA[i] || f.Pos != wantPos[i] || f.Len != wantLen[i] {
+		if f.Phonetized != wantIPA[i] || f.Pos != wantPos[i] || f.Len != wantLen[i] {
 			t.Errorf("unexpected fragment[%d]: %+v (want IPA=%q, Pos=%d, Len=%d)", i, f, wantIPA[i], wantPos[i], wantLen[i])
 		}
 	}

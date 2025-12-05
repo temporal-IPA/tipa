@@ -23,7 +23,7 @@ import (
 //     generic pronunciations for characters, syllables, or short chunks.
 //
 // The scanner always walks the input text from left to right and, at
-// each rune position, tries to match the **longest possible dictionary
+// each rune position, tries to match **the longest possible dictionary
 // key**, up to the precomputed MaxKeyLen of the dictionary. This gives
 // multi‑word entries priority over shorter sub‑entries, e.g. it will
 // match:
@@ -42,6 +42,12 @@ import (
 //
 // Any text that cannot be matched is returned as RawText so that callers
 // can inspect or post‑process it.
+//
+// When several dictionary entries / pronunciations match the same
+// surface span, all variants are preserved as individual Fragment
+// instances that share the same Pos / Len but differ by Phonetized,
+// Variant, and (optionally) Confidence. The ordering of variants for a
+// given span is stable and reflects their relative confidence.
 type Determinist struct {
 	// langDict is the main phonetic dictionary for the language.
 	langDict phono.Dictionary
@@ -63,7 +69,27 @@ type Determinist struct {
 	finalTolerantKeyMap phono.KeyMap
 	// finalMaxKeyLen caches the maximum key length (in runes) of finalDict.
 	finalMaxKeyLen int
+
+	// picker encapsulates the strategy used to select pronunciations
+	// (and their relative confidence) for a given surface span.
+	picker Picker
 }
+
+// Picker implements the strategy used to extract pronunciations and
+// relative confidences from a dictionary for a given surface form.
+//
+// The current implementation is intentionally simple and purely
+// dictionary‑based. It returns all distinct pronunciations reachable
+// from the candidate keys together with a heuristic confidence in
+// [0,1]. These per‑variant confidences are later multiplied by the
+// pass‑level confidence used by the scanner (strict vs tolerant).
+//
+// The "line" parameter accepted by PickAll is the full textual line
+// that contains the surface span. It is not used yet but is part of
+// the API so that future implementations can take broader context
+// (e.g. morphosyntactic analysis) into account without changing the
+// scanner.
+type Picker struct{}
 
 // NewDeterminist creates a new Determinist g2p processor instance.
 //
@@ -82,6 +108,7 @@ func NewDeterminist(langDict phono.Dictionary, final phono.Dictionary) *Determin
 		langDictNormKeyMap: langNorm,
 		langMaxKeyLen:      langDict.MaxKeyLen(),
 		finalDict:          final,
+		picker:             Picker{},
 	}
 
 	if len(langNorm) > 0 {
@@ -120,9 +147,11 @@ func NewDeterminist(langDict phono.Dictionary, final phono.Dictionary) *Determin
 //     with positions adjusted so that Fragment.Pos / RawText.Pos
 //     are expressed as rune offsets in the original text.
 //
-// The returned Fragments slice is sorted by Pos (ascending) and, for
-// equal positions, by longer Len first. RawTexts are merged so that
-// at most one RawText covers any contiguous region of unmatched text.
+// The returned Fragments slice is sorted by Pos (ascending). For equal
+// positions, fragments with longer Len come first; for identical spans
+// (same Pos and Len), variants are ordered by decreasing Confidence and
+// then by Variant index. RawTexts are merged so that at most one
+// RawText covers any contiguous region of unmatched text.
 func (d Determinist) Scan(text string, tolerant bool) Result {
 	////////////////////////////////////////
 	// #1 Scan the text using the langDict.
@@ -136,6 +165,7 @@ func (d Determinist) Scan(text string, tolerant bool) Result {
 		d.langTolerantKeyMap,
 		d.langMaxKeyLen,
 		tolerant,
+		text,
 	)
 
 	////////////////////////////////////////////
@@ -164,6 +194,7 @@ func (d Determinist) Scan(text string, tolerant bool) Result {
 				d.finalTolerantKeyMap,
 				d.finalMaxKeyLen,
 				tolerant,
+				text,
 			)
 
 			// If fragments are found inside this raw text, add them to the
@@ -192,12 +223,7 @@ func (d Determinist) Scan(text string, tolerant bool) Result {
 	}
 
 	// Ensure the same ordering and merging guarantees as scan().
-	sort.Slice(finalFragments, func(i, j int) bool {
-		if finalFragments[i].Pos == finalFragments[j].Pos {
-			return finalFragments[i].Len > finalFragments[j].Len
-		}
-		return finalFragments[i].Pos < finalFragments[j].Pos
-	})
+	sortFragments(finalFragments)
 	finalRawText = mergeRawTexts(finalRawText)
 
 	return Result{
@@ -217,6 +243,11 @@ func (d Determinist) Scan(text string, tolerant bool) Result {
 // The dictionary‑specific parameters (key maps and MaxKeyLen) are
 // provided so that the same logic can be reused for langDict and
 // finalDict.
+//
+// The "line" parameter is the full line of text being processed (the
+// same value that was passed to Scan). It is forwarded to the Picker
+// so that more context‑sensitive selection heuristics can be added
+// without changing the scanning logic.
 func (d Determinist) scan(
 	text string,
 	dictionary phono.Dictionary,
@@ -224,6 +255,7 @@ func (d Determinist) scan(
 	tolerantKeyMap phono.KeyMap,
 	maxKeyLen int,
 	tolerant bool,
+	line string,
 ) ([]Fragment, []RawText) {
 	// Strict pass (lowercase).
 	fragments, rawTexts := d.scanSegment(
@@ -234,16 +266,12 @@ func (d Determinist) scan(
 		maxKeyLen,
 		phono.NormalizeString,
 		1.0,
+		line,
 	)
 
 	// If tolerant mode is disabled or everything was recognized, we are done.
 	if !tolerant || len(rawTexts) == 0 || len(tolerantKeyMap) == 0 {
-		sort.Slice(fragments, func(i, j int) bool {
-			if fragments[i].Pos == fragments[j].Pos {
-				return fragments[i].Len > fragments[j].Len
-			}
-			return fragments[i].Pos < fragments[j].Pos
-		})
+		sortFragments(fragments)
 		rawTexts = mergeRawTexts(rawTexts)
 		return fragments, rawTexts
 	}
@@ -263,6 +291,7 @@ func (d Determinist) scan(
 			maxKeyLen,
 			tolerantNormalize,
 			0.9,
+			line,
 		)
 
 		if len(segFrags) == 0 {
@@ -276,12 +305,7 @@ func (d Determinist) scan(
 		tolerantRawTexts = append(tolerantRawTexts, segRaws...)
 	}
 
-	sort.Slice(tolerantFragments, func(i, j int) bool {
-		if tolerantFragments[i].Pos == tolerantFragments[j].Pos {
-			return tolerantFragments[i].Len > tolerantFragments[j].Len
-		}
-		return tolerantFragments[i].Pos < tolerantFragments[j].Pos
-	})
+	sortFragments(tolerantFragments)
 	tolerantRawTexts = mergeRawTexts(tolerantRawTexts)
 
 	return tolerantFragments, tolerantRawTexts
@@ -309,9 +333,11 @@ func (d Determinist) scan(
 //     length, so the longest matching dictionary key always wins.
 //
 //  3. For the first candidate whose normalized form is found in the
-//     dictionary key map:
+//     dictionary key map and for which at least one pronunciation is
+//     returned by the Picker:
 //     - flush any pending RawText preceding i,
-//     - emit a Fragment covering exactly that substring,
+//     - emit one Fragment per pronunciation variant, all sharing the
+//     same Pos / Len but different Variant / Confidence,
 //     - advance i by L and repeat.
 //
 //  4. If no candidate matches, the current rune is absorbed into the
@@ -332,7 +358,8 @@ func (d Determinist) scanSegment(
 	normalized phono.KeyMap,
 	maxKeyLen int,
 	normalizeCandidate func(string) string,
-	confidence float64,
+	passConfidence float64,
+	line string,
 ) ([]Fragment, []RawText) {
 	runes := []rune(text)
 	n := len(runes)
@@ -396,7 +423,15 @@ func (d Determinist) scanSegment(
 				continue
 			}
 
-			// Flush any pending raw text before emitting a fragment.
+			// Ask the picker for all available pronunciation variants.
+			options := d.picker.PickAll(dictionary, keys, candidate, line)
+			if len(options) == 0 {
+				// No usable pronunciation for this candidate: keep looking
+				// for a shorter match at the same position.
+				continue
+			}
+
+			// Flush any pending raw text before emitting fragments.
 			if currentRawStart != -1 && currentRawStart < i {
 				rawTexts = append(rawTexts, RawText{
 					Text: string(runes[currentRawStart:i]),
@@ -406,13 +441,17 @@ func (d Determinist) scanSegment(
 				currentRawStart = -1
 			}
 
-			phonetized := d.pickPhon(dictionary, keys, candidate)
-			fragments = append(fragments, Fragment{
-				Phonetized: phonetized,
-				Pos:        offset + i,
-				Len:        l,
-				Confidence: confidence,
-			})
+			// Emit one fragment per pronunciation variant, all sharing the
+			// same span but carrying their own Variant index and confidence.
+			for variantIndex, opt := range options {
+				fragments = append(fragments, Fragment{
+					Phonetized: opt.S,
+					Pos:        offset + i,
+					Len:        l,
+					Confidence: passConfidence * opt.C,
+					Variant:    variantIndex,
+				})
+			}
 
 			i += l
 			found = true
@@ -440,39 +479,87 @@ func (d Determinist) scanSegment(
 	return fragments, rawTexts
 }
 
-// pickPhon selects the IPA transcription associated with one of the
-// dictionary keys that matched a given surface form.
+// PickAll returns all distinct pronunciations associated with the
+// candidate dictionary keys for a given surface form.
 //
-// In the strict (lowercase) pass, all candidateKeys share the same
-// NormalizeString form as the surface. In the tolerant pass, several
-// keys that differ only by diacritics (e.g. "garçon" and "garcon")
-// can be grouped together. In that case we prefer the key whose
-// NormalizeString form is closest to the surface normalization.
+// The returned slice is ordered by decreasing confidence. The current
+// heuristic is deliberately simple:
 //
-// The function currently returns the first pronunciation of the
-// selected key.
-func (d Determinist) pickPhon(dict phono.Dictionary, candidateKeys []string, surface string) phono.Phonetized {
-	if len(candidateKeys) == 0 {
-		return ""
+//   - keys whose NormalizeString form exactly matches the surface
+//     normalization receive a base score of 1.0;
+//   - other keys (typically brought in by tolerant normalization)
+//     are slightly down‑weighted (0.9);
+//   - additional pronunciations for the same key are given a small
+//     penalty compared to the first pronunciation.
+//
+// The "line" parameter is accepted for future, context‑sensitive
+// heuristics but is not used yet.
+func (Picker) PickAll(dict phono.Dictionary, candidateKeys []string, surface string, line string) []phono.AnnotatedPhonetized {
+	if len(candidateKeys) == 0 || len(dict) == 0 {
+		return nil
 	}
+
 	normalizedSurface := phono.NormalizeString(surface)
 
-	// Prefer keys whose NormalizeString form is identical to the surface.
-	for _, k := range candidateKeys {
-		if phono.NormalizeString(k) == normalizedSurface {
-			if prons := dict[k]; len(prons) > 0 {
-				return prons[0]
+	options := make([]phono.AnnotatedPhonetized, 0, len(candidateKeys))
+	seen := make(map[phono.Phonetized]struct{})
+
+	for _, key := range candidateKeys {
+		prons, ok := dict[key]
+		if !ok || len(prons) == 0 {
+			continue
+		}
+
+		normKey := phono.NormalizeString(key)
+		keyWeight := 1.0
+		if normKey != "" && normKey != normalizedSurface {
+			// The candidate key differs from the surface once normalized,
+			// which is typically the case in tolerant mode (missing or
+			// mismatched diacritics). Give it a slightly lower weight.
+			keyWeight = 0.9
+		}
+
+		for i, ipa := range prons {
+			if ipa == "" {
+				continue
 			}
+
+			p := phono.Phonetized(ipa)
+			if _, dup := seen[p]; dup {
+				// Avoid returning the exact same pronunciation twice when
+				// it appears under multiple keys.
+				continue
+			}
+			seen[p] = struct{}{}
+
+			pronWeight := 1.0
+			if i > 0 {
+				// Alternative pronunciations for the same key are kept but
+				// slightly down‑weighted compared to the first one.
+				pronWeight = 0.95
+			}
+
+			options = append(options, phono.AnnotatedPhonetized{
+				S: p,
+				C: keyWeight * pronWeight,
+			})
 		}
 	}
 
-	// Fallback: first key that has at least one pronunciation.
-	for _, k := range candidateKeys {
-		if prons := dict[k]; len(prons) > 0 {
-			return prons[0]
-		}
+	if len(options) == 0 {
+		return nil
 	}
-	return ""
+
+	// Order by decreasing confidence while preserving the relative order
+	// of options with the same score.
+	sort.SliceStable(options, func(i, j int) bool {
+		if options[i].C == options[j].C {
+			return i < j
+		}
+		return options[i].C > options[j].C
+	})
+
+	return options
 }
 
 // buildDiacriticInsensitiveKeyMap constructs a diacritic‑insensitive view of
@@ -516,6 +603,30 @@ func removeDiacritics(s string) string {
 		out = append(out, r)
 	}
 	return string(out)
+}
+
+// sortFragments orders fragments by position and span length, and, for
+// identical spans, by decreasing confidence then increasing variant.
+func sortFragments(frags []Fragment) {
+	if len(frags) < 2 {
+		return
+	}
+
+	sort.Slice(frags, func(i, j int) bool {
+		fi := frags[i]
+		fj := frags[j]
+
+		if fi.Pos == fj.Pos {
+			if fi.Len == fj.Len {
+				if fi.Confidence == fj.Confidence {
+					return fi.Variant < fj.Variant
+				}
+				return fi.Confidence > fj.Confidence
+			}
+			return fi.Len > fj.Len
+		}
+		return fi.Pos < fj.Pos
+	})
 }
 
 // mergeRawTexts merges adjacent RawText entries that represent

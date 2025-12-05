@@ -17,6 +17,11 @@ type IPA = string
 
 type Phonetized = string
 
+type AnnotatedPhonetized struct {
+	S Phonetized `json:"s"`
+	C float64    `json:"c"`
+}
+
 type Dictionary map[Expression][]IPA
 
 // Representation holds the internal dictionary representation used
