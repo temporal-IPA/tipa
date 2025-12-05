@@ -18,7 +18,7 @@ func sniffTxtSlashedIpa(sniff []byte, isEOF bool) bool {
 	}
 	reader := bytes.NewReader(sniff)
 	scanner := bufio.NewScanner(reader)
-	i := 10 // scan 10 lines.
+	i := 2 // scan 2 lines.
 	for scanner.Scan() {
 		line := scanner.Text()
 		line = strings.TrimSpace(line)
