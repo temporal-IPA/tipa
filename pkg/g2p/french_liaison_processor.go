@@ -9,6 +9,19 @@ import (
 // FrenchLiaisonProcessor applies simple French liaison heuristics
 // on top of a grapheme‑to‑phoneme Result. It never modifies the
 // original text, only the Phonetized fields of the fragments.
+//
+// The implementation is intentionally conservative: it only inserts
+// liaison in a few well‑defined contexts (determiners, pronouns,
+// some adjectives, très/trop, and optionally “final consonant”
+// heuristics) and only when the right‑hand word begins with a
+// vowel or an h muet.
+//
+// As of this version, liaison consonants are realised primarily
+// as **onsets of the right‑hand word** (e.g. "des albatros" →
+// "de zalbatʁos"), which avoids unnatural sequences such as
+// "de z albatʁos" where the liaison consonant appears as an
+// isolated token. When we cannot safely attach to the right,
+// we fall back to appending the consonant to the left word.
 type FrenchLiaisonProcessor struct {
 	// allowLooseLiaison controls whether we are allowed to use the
 	// loose "final consonant" heuristic for arbitrary words, beyond
@@ -155,9 +168,15 @@ func (p *FrenchLiaisonProcessor) Apply(res Result) Result {
 			continue
 		}
 
-		// Insert the liaison consonant at the end of the left fragment.
-		frag := &out.Fragments[left.fragIndex]
-		frag.Phonetized = appendLiaisonPhone(frag.Phonetized, liaisonPhone)
+		// Insert the liaison consonant across the left/right fragments.
+		// We prefer to realise it as an onset on the right fragment
+		// (e.g. "des albatros" → "de zalbatʁos") rather than as a
+		// standalone "z" token between the two words.
+		p.insertLiaisonConsonant(
+			&out.Fragments[left.fragIndex],
+			&out.Fragments[right.fragIndex],
+			liaisonPhone,
+		)
 	}
 
 	return out
@@ -447,9 +466,48 @@ func lastLetter(s string) rune {
 	return 0
 }
 
+// insertLiaisonConsonant realises the liaison consonant between
+// two adjacent fragments.
+//
+// Preferred behaviour:
+//   - realise the consonant as an **onset** on the right fragment,
+//     so "des albatros" → left: "de", right: "zalbatʁos"
+//     and "vastes oiseaux" → "vast zwazo".
+//
+// This avoids intermediate "z" tokens ("de z albatʁos") that are
+// awkward both visually and for downstream syllabification.
+//
+// Fallback behaviour:
+//   - if the right fragment has no usable pronunciation, append the
+//     liaison consonant to the left fragment as before.
+func (p *FrenchLiaisonProcessor) insertLiaisonConsonant(leftFrag, rightFrag *Fragment, phone string) {
+	phone = strings.TrimSpace(phone)
+	if phone == "" || leftFrag == nil {
+		return
+	}
+
+	// Preferred: attach to the right fragment if it has a non‑empty
+	// pronunciation. We strip outer whitespace but keep everything else
+	// (stress marks, dots, etc.) intact.
+	if rightFrag != nil {
+		base := strings.TrimSpace(string(rightFrag.Phonetized))
+		if base != "" {
+			rightFrag.Phonetized = phone + base
+			return
+		}
+	}
+
+	// Fallback: no usable right‑hand pronunciation, keep the old
+	// behaviour and append the liaison to the left fragment.
+	leftFrag.Phonetized = appendLiaisonPhone(string(leftFrag.Phonetized), phone)
+}
+
 // appendLiaisonPhone appends a liaison consonant to an existing
 // phonetized string, inserting a single space if both parts are
 // non‑empty.
+//
+// This helper is now mainly used as a **fallback** when we cannot
+// safely attach the liaison consonant to the right‑hand fragment.
 func appendLiaisonPhone(base, phone string) string {
 	base = strings.TrimSpace(base)
 	phone = strings.TrimSpace(phone)
