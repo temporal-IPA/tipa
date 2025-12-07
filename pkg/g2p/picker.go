@@ -12,9 +12,9 @@ import (
 //
 // The current implementation is intentionally simple and purely
 // dictionary‑based. It returns all distinct pronunciations reachable
-// from the candidate keys together with a heuristic confidence in
+// from the candidate keys together with heuristic confidence in
 // [0,1]. These per‑variant confidences are later multiplied by the
-// pass‑level confidence used by the scanner (strict vs tolerant).
+// pass‑level confidence used by the scanner (strict vs. tolerant).
 //
 // The "line" parameter accepted by PickAll is the full textual line
 // that contains the surface span. It is not used yet but is part of

@@ -1,6 +1,7 @@
 package g2p
 
 import (
+	"context"
 	"sort"
 	"unicode"
 
@@ -75,6 +76,26 @@ type Determinist struct {
 	picker Picker
 }
 
+// streamedResult is an internal helper type used by the channel‑based
+// scanning implementation. It carries a per‑line Result together with
+// bookkeeping information needed to reconstruct positions in the
+// original multi‑line text.
+type streamedResult struct {
+	// Result contains the phonetic analysis for a single logical line
+	// (without the trailing newline).
+	Result Result
+
+	// startOffset is the rune offset of the first rune of Result.Text
+	// in the original input string.
+	startOffset int
+
+	// hasTrailingNewline reports whether this line in the original text
+	// was immediately followed by a '\n' rune. When true, Scan() emits
+	// a RawText span for that newline so that behaviour matches the
+	// non‑streaming implementation.
+	hasTrailingNewline bool
+}
+
 // NewDeterminist creates a new Determinist g2p processor instance.
 //
 // langDict is the main, usually large, lexicon. final may be nil; when
@@ -136,7 +157,184 @@ func NewDeterminist(langDict phono.Dictionary, final phono.Dictionary) *Determin
 // (same Pos and Len), variants are ordered by decreasing Confidence and
 // then by Variant index. RawTexts are merged so that at most one
 // RawText covers any contiguous region of unmatched text.
+//
+// Internally, Scan now uses the same channel‑based, line‑oriented
+// implementation as StreamScan and then merges all per‑line results
+// back into a single Result that refers to the original multi‑line
+// input.
 func (d Determinist) Scan(text string, tolerant bool) Result {
+	// Use a background context here; callers who need cancellation or
+	// incremental consumption should use StreamScan directly.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var allFragments []Fragment
+	var allRawTexts []RawText
+
+	// streamScanWithOffsets performs the actual line‑by‑line scanning
+	// and sends one streamedResult per logical line.
+	for sr := range d.streamScanWithOffsets(ctx, text, tolerant) {
+		res := sr.Result
+
+		// Rebase fragment positions from line‑relative offsets to rune
+		// offsets in the original text.
+		for _, f := range res.Fragments {
+			adjusted := f
+			adjusted.Pos += sr.startOffset
+			allFragments = append(allFragments, adjusted)
+		}
+
+		// Same for raw text spans produced while scanning the line.
+		for _, rt := range res.RawTexts {
+			adjusted := rt
+			adjusted.Pos += sr.startOffset
+			allRawTexts = append(allRawTexts, adjusted)
+		}
+
+		// When the original text had a '\n' right after this line, keep
+		// it as a RawText span so that the behaviour matches the original
+		// single‑pass Scan implementation.
+		if sr.hasTrailingNewline {
+			newlinePos := sr.startOffset + len([]rune(res.Text))
+			allRawTexts = append(allRawTexts, RawText{
+				Text: "\n",
+				Pos:  newlinePos,
+				Len:  1,
+			})
+		}
+	}
+
+	// Global ordering and merging guarantees.
+	sortFragments(allFragments)
+	allRawTexts = mergeRawTexts(allRawTexts)
+
+	return Result{
+		Text:      text,
+		Fragments: allFragments,
+		RawTexts:  allRawTexts,
+	}
+}
+
+// StreamScan scans the input text line by line and returns a read‑only
+// channel of Result values.
+//
+// Each emitted Result corresponds to a single logical line of the
+// original text, i.e. the runes between two '\n' delimiters, without
+// the trailing newline itself. Fragment.Pos and RawText.Pos are rune
+// offsets relative to the beginning of that line.
+//
+// The returned channel is closed once all lines have been processed or
+// the context is cancelled. Cancellation is observed between lines;
+// a very long single line is processed atomically.
+func (d Determinist) StreamScan(ctx context.Context, text string, tolerant bool) <-chan Result {
+	out := make(chan Result)
+
+	internal := d.streamScanWithOffsets(ctx, text, tolerant)
+
+	go func() {
+		defer close(out)
+
+		for sr := range internal {
+			select {
+			case <-ctx.Done():
+				return
+			case out <- sr.Result:
+			}
+		}
+	}()
+
+	return out
+}
+
+// streamScanWithOffsets is the internal streaming implementation used
+// by both Scan (which merges back to a single Result) and StreamScan
+// (which exposes per‑line Results). It walks the input in rune space,
+// splits it on '\n', and for each logical line:
+//
+//   - runs the full single‑line pipeline (scanText);
+//   - sends a streamedResult containing the per‑line Result, its rune
+//     start offset in the original text, and whether it was followed
+//     by a newline in the original text.
+func (d Determinist) streamScanWithOffsets(ctx context.Context, text string, tolerant bool) <-chan streamedResult {
+	out := make(chan streamedResult)
+	go func() {
+		defer close(out)
+
+		if len(text) == 0 {
+			// Empty input: nothing to emit, keep Scan behaviour consistent.
+			return
+		}
+
+		runes := []rune(text)
+		n := len(runes)
+
+		lineStart := 0
+
+		for i := 0; i < n; i++ {
+			if runes[i] == '\n' {
+				// The logical line is the slice [lineStart, i) (possibly empty).
+				lineText := string(runes[lineStart:i])
+
+				// Observe cancellation between lines.
+				if err := ctx.Err(); err != nil {
+					return
+				}
+
+				res := d.scanText(lineText, tolerant)
+
+				// This line in the original text is immediately followed
+				// by a newline.
+				select {
+				case <-ctx.Done():
+					return
+				case out <- streamedResult{
+					Result:             res,
+					startOffset:        lineStart,
+					hasTrailingNewline: true,
+				}:
+				}
+
+				lineStart = i + 1
+			}
+		}
+
+		// Final segment after the last newline (if any). When the text
+		// ends with '\n', lineStart == n and there is no additional line
+		// after the trailing newline, which matches the behaviour of the
+		// original non‑streaming Scan.
+		if lineStart < n {
+			lineText := string(runes[lineStart:n])
+
+			if err := ctx.Err(); err != nil {
+				return
+			}
+
+			res := d.scanText(lineText, tolerant)
+
+			select {
+			case <-ctx.Done():
+				return
+			case out <- streamedResult{
+				Result:             res,
+				startOffset:        lineStart,
+				hasTrailingNewline: false,
+			}:
+			}
+		}
+	}()
+
+	return out
+}
+
+// scanText runs the full two‑stage pipeline (langDict + optional
+// finalDict) on a single text string and returns the corresponding
+// Result. It is the non‑streaming core used for each logical line.
+//
+// The behaviour is equivalent to the original Scan implementation
+// applied to that string: greedy longest‑match scan on langDict,
+// optional tolerant pass, then optional rescan of raw spans with
+// finalDict, followed by global fragment ordering and raw‑text merge.
+func (d Determinist) scanText(text string, tolerant bool) Result {
 	////////////////////////////////////////
 	// #1 Scan the text using the langDict.
 	// This is the main phase and should recognize the majority of the text.
