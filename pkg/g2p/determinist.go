@@ -20,23 +20,35 @@ type DeterministOptions struct {
 	// When true, spans that remain unmatched after the strict pass are
 	// rescanned using a diacritic‑insensitive normalization so that
 	// "garcon" can match "garçon", etc.
-	DiacriticInsensitive bool
+	DiacriticInsensitive bool `json:"diacriticInsensitive"`
 
-	// SingleGraphemeOnlyAsWord restricts the use of single‑rune dictionary
-	// entries to isolated one‑letter words.
+	// AllowPartialMatch controls whether dictionary entries are allowed
+	// to match inside longer "expressions" (words or multi‑word sequences).
 	//
-	// When true, entries whose key is a single rune are only matched when
-	// that rune does not appear inside a longer alphanumeric token. This
-	// prevents single‑letter keys from being used to decompose arbitrary
-	// unknown words character by character, while still allowing them for
-	// genuine one‑letter words such as "a".
-	SingleGraphemeOnlyAsWord bool
+	// An expression is a substring of the input text bounded by
+	// delimiters. Delimiters are Unicode whitespace and (by default)
+	// punctuation characters; callers can customize the delimiter set
+	// via Determinist.SetDelimiters.
+	//
+	// When true, the scanner behaves like a classic greedy longest‑match
+	// engine: any substring may be matched by the dictionary, subject to
+	// the usual precedence rules. This allows decomposing tokens such as
+	// "abcdE" into "a" + "b" + "c" + "d" when the dictionary only
+	// contains the individual graphemes.
+	//
+	// When false, matches are only accepted when their span coincides
+	// with expression boundaries (start/end of the string or a delimiter
+	// on both sides). In that mode a key like "benoit" will not be used
+	// to match the internal substring of "GrosBenoit", and internal
+	// substrings such as "Font" / "ena" will not be extracted from
+	// "Fontenay".
+	AllowPartialMatch bool `json:"allowPartialMatch"`
 }
 
 // Determinist is a greedy, dictionary‑based grapheme‑to‑phoneme (g2p)
 // processor.
 //
-// It works with a single dictionary per instance. To model multi‑stage
+// It works with a single dictionary, per instance. To model multi‑stage
 // pipelines (large lexicon, then tolerant fallback, then grapheme /
 // diphone dictionary), instantiate several Determinist processors with
 // different dictionaries and options and chain them using the Processor
@@ -82,6 +94,14 @@ type Determinist struct {
 	// picker encapsulates the strategy used to select pronunciations
 	// (and their relative confidence) for a given surface span.
 	picker Picker
+
+	// delimiters holds the configurable set of runes that are treated
+	// as "expression delimiters" for the AllowPartialMatch option.
+	//
+	// When nil, the default behaviour is used: all Unicode whitespace
+	// and punctuation characters act as delimiters. Custom delimiters
+	// can be installed via SetDelimiters.
+	delimiters map[rune]struct{}
 }
 
 // Ensure Determinist implements the pipeline interfaces.
@@ -94,11 +114,11 @@ var (
 //
 // They correspond to a strict scan:
 //   - DiacriticInsensitive: false (no tolerant pass)
-//   - SingleGraphemeOnlyAsWord: false (single‑rune entries may be used
+//   - AllowPartialMatch:    true  (dictionary entries may be used
 //     inside longer tokens).
 var DefaultDeterministOptions = DeterministOptions{
-	DiacriticInsensitive:     false,
-	SingleGraphemeOnlyAsWord: false,
+	DiacriticInsensitive: false,
+	AllowPartialMatch:    true,
 }
 
 // NewDeterminist creates a new Determinist with the given dictionary
@@ -134,6 +154,30 @@ func (d *Determinist) Options() DeterministOptions {
 // SetOptions changes the default options used by Scan / Apply.
 func (d *Determinist) SetOptions(opts DeterministOptions) {
 	d.options = opts
+}
+
+// SetDelimiters configures the set of runes that are treated as
+// expression delimiters when AllowPartialMatch is false.
+//
+// When AllowPartialMatch=false, dictionary matches are only accepted
+// when their span starts and ends next to a delimiter (or at the
+// start / end of the string). By default, delimiters are Unicode
+// whitespace characters and punctuation.
+//
+// Passing an empty slice resets the Determinist to its default
+// behaviour (whitespace + punctuation). Regardless of this setting,
+// Unicode whitespace is always considered a delimiter.
+func (d *Determinist) SetDelimiters(delims []rune) {
+	if len(delims) == 0 {
+		d.delimiters = nil
+		return
+	}
+
+	m := make(map[rune]struct{}, len(delims))
+	for _, r := range delims {
+		m[r] = struct{}{}
+	}
+	d.delimiters = m
 }
 
 // Scan is a convenience helper that runs the Determinist on raw text
@@ -360,9 +404,9 @@ func (d *Determinist) scan(
 //  4. If no candidate matches, the current rune is absorbed into the
 //     current RawText span and i is advanced by one.
 //
-// When opts.SingleGraphemeOnlyAsWord is true, single‑rune dictionary
-// entries are only used when they form an isolated one‑letter word
-// (i.e. they are not surrounded by other letters or digits).
+//  5. When opts.AllowPartialMatch is false, only candidates that
+//     coincide with expression boundaries (as defined by the delimiter
+//     set) are considered at step 2.
 func (d *Determinist) scanSegment(
 	text string,
 	offset int,
@@ -429,9 +473,10 @@ func (d *Determinist) scanSegment(
 				continue
 			}
 
-			// Optional restriction: prevent single‑rune dictionary entries
-			// from being used inside longer alphanumeric tokens.
-			if opts.SingleGraphemeOnlyAsWord && l == 1 && !isIsolatedSingleRuneWord(runes, i) {
+			// When partial matches are disabled, only accept candidates
+			// that coincide with expression boundaries (as defined by
+			// the delimiter set).
+			if !opts.AllowPartialMatch && !d.candidateIsWholeExpression(runes, i, l) {
 				continue
 			}
 
@@ -498,38 +543,65 @@ func (d *Determinist) scanSegment(
 	return fragments, rawTexts
 }
 
-// isIsolatedSingleRuneWord reports whether the rune at position i in
-// the slice represents a one‑letter "word" for the purposes of the
-// SingleGraphemeOnlyAsWord option.
+// candidateIsWholeExpression reports whether the candidate substring
+// runes[start : start+length] coincides with "expression" boundaries as
+// defined by the delimiter set.
 //
-// A rune is considered an isolated word if:
-//   - it is itself a letter or a digit, and
-//   - the previous rune (if any) is not a letter or digit,
-//   - the next rune (if any) is not a letter or digit.
-func isIsolatedSingleRuneWord(runes []rune, i int) bool {
-	if i < 0 || i >= len(runes) {
+// A candidate is considered a whole expression when:
+//
+//   - it is non‑empty and within bounds;
+//   - the rune immediately before it (if any) is a delimiter; and
+//   - the rune immediately after it (if any) is a delimiter.
+//
+// Start or end of the string are treated as implicit delimiters.
+func (d *Determinist) candidateIsWholeExpression(runes []rune, start, length int) bool {
+	if length <= 0 {
+		return false
+	}
+	if start < 0 || start >= len(runes) {
 		return false
 	}
 
-	if !isAlnumRune(runes[i]) {
+	end := start + length
+	if end > len(runes) {
 		return false
 	}
 
-	if i > 0 && isAlnumRune(runes[i-1]) {
+	// Left boundary: either at beginning of string or preceded by a delimiter.
+	if start > 0 && !d.isDelimiterRune(runes[start-1]) {
 		return false
 	}
-	if i+1 < len(runes) && isAlnumRune(runes[i+1]) {
+
+	// Right boundary: either at end of string or followed by a delimiter.
+	if end < len(runes) && !d.isDelimiterRune(runes[end]) {
 		return false
 	}
 
 	return true
 }
 
-// isAlnumRune reports whether r is considered part of an alphanumeric
-// token (letter or digit) for the purposes of
-// SingleGraphemeOnlyAsWord.
-func isAlnumRune(r rune) bool {
-	return unicode.IsLetter(r) || unicode.IsNumber(r)
+// isDelimiterRune reports whether r is treated as an "expression
+// delimiter" for the purposes of AllowPartialMatch.
+//
+// Unicode whitespace is always considered a delimiter. For other runes,
+// the behaviour depends on whether a custom delimiter set has been
+// configured via SetDelimiters:
+//
+//   - when no custom set is provided, Unicode punctuation characters
+//     are treated as delimiters;
+//   - when a set is provided, only runes present in that set are
+//     considered delimiters (in addition to whitespace).
+func (d *Determinist) isDelimiterRune(r rune) bool {
+	if unicode.IsSpace(r) {
+		return true
+	}
+
+	if d == nil || d.delimiters == nil {
+		return unicode.IsPunct(r)
+	}
+
+	_, ok := d.delimiters[r]
+	return ok
 }
 
 // buildDiacriticInsensitiveKeyMap constructs a diacritic‑insensitive view of

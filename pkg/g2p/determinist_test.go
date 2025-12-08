@@ -12,50 +12,66 @@ import (
 // the original text rune by rune and:
 //
 //   - if a fragment starts at this rune position, appending its
-//     Phonetized value;
+//     Phonetized value and skipping the covered span;
 //   - otherwise, appending the original rune.
 //
 // This helper assumes that fragments are non‑overlapping and only used
 // for simple tests; it is **not** a general renderer for all pipelines,
-// but it is sufficient to validate SingleGraphemeOnlyAsWord behaviour.
+// but it is sufficient to validate AllowPartialMatch behaviour and
+// basic scan properties.
 func renderPhoneticOrRaw(res Result) string {
 	runes := []rune(res.Text)
 	if len(runes) == 0 {
 		return ""
 	}
 
-	posToPron := make(map[int]string, len(res.Fragments))
+	type span struct {
+		s string
+		l int
+	}
+
+	posToSpan := make(map[int]span, len(res.Fragments))
 	for _, f := range res.Fragments {
 		// For identical Pos we keep the first (highest‑confidence) variant.
-		if _, exists := posToPron[f.Pos]; exists {
+		if _, exists := posToSpan[f.Pos]; exists {
 			continue
 		}
-		posToPron[f.Pos] = f.Phonetized
+		posToSpan[f.Pos] = span{
+			s: f.Phonetized,
+			l: f.Len,
+		}
 	}
 
 	var b strings.Builder
-	for pos, r := range runes {
-		if s, ok := posToPron[pos]; ok {
-			b.WriteString(s)
-		} else {
-			b.WriteRune(r)
+	for pos := 0; pos < len(runes); pos++ {
+		if sp, ok := posToSpan[pos]; ok {
+			b.WriteString(sp.s)
+			// Skip underlying runes covered by this fragment.
+			if sp.l > 0 {
+				pos += sp.l - 1
+			}
+			continue
 		}
+		b.WriteRune(runes[pos])
 	}
 	return b.String()
 }
 
-// TestScanProgressiveThroughUnknownChunk verifies that the scanner
-// continues to make progress past unknown substrings. In particular it
-// must still be able to find "Benoit" after the unknown "Gros" in the
-// text "Le GrosBenoit".
-func TestScanProgressiveThroughUnknownChunk(t *testing.T) {
+// TestScanProgressiveThroughUnknownChunkWithPartialMatch verifies that
+// the scanner continues to make progress past unknown substrings when
+// partial matching is allowed. In particular it must still be able to
+// find "Benoit" after the unknown "Gros" in the text "Le GrosBenoit".
+func TestScanProgressiveThroughUnknownChunkWithPartialMatch(t *testing.T) {
 	langDict := phono.Dictionary{
 		"benoit": {"bənwa"},
 		"le":     {"lə"},
 	}
 
 	d := NewDeterminist(langDict)
-	res := d.Scan("Le GrosBenoit")
+	res := d.ScanWithOptions("Le GrosBenoit", DeterministOptions{
+		DiacriticInsensitive: true,
+		AllowPartialMatch:    true,
+	})
 
 	if got, want := len(res.Fragments), 2; got != want {
 		t.Fatalf("expected %d fragments, got %d", want, got)
@@ -81,6 +97,59 @@ func TestScanProgressiveThroughUnknownChunk(t *testing.T) {
 	if raw.Text != " Gros" || raw.Pos != 2 || raw.Len != 5 {
 		t.Errorf("unexpected raw text: %+v", raw)
 	}
+
+	rendered := renderPhoneticOrRaw(res)
+	if rendered != "lə Grosbənwa" {
+		t.Fatalf("expected rendered text %q, got %q", "lə Grosbənwa", rendered)
+	}
+}
+
+// TestScanProgressiveThroughUnknownChunkWithoutPartialMatch verifies
+// that when AllowPartialMatch is disabled, internal matches inside
+// tokens like "GrosBenoit" are not taken, while full‑token matches
+// such as "Le" are still allowed.
+func TestScanProgressiveThroughUnknownChunkWithoutPartialMatch(t *testing.T) {
+	langDict := phono.Dictionary{
+		"benoit": {"bənwa"},
+		"le":     {"lə"},
+	}
+
+	d := NewDeterminist(langDict)
+	res := d.ScanWithOptions("Le GrosBenoit", DeterministOptions{
+		DiacriticInsensitive: true,
+		AllowPartialMatch:    false,
+	})
+
+	if got, want := len(res.Fragments), 1; got != want {
+		t.Fatalf("expected %d fragment, got %d (fragments=%+v)", want, got, res.Fragments)
+	}
+
+	frag0 := res.Fragments[0]
+	if frag0.Phonetized != "lə" || frag0.Pos != 0 || frag0.Len != 2 {
+		t.Errorf("unexpected fragment with AllowPartialMatch=false: %+v", frag0)
+	}
+
+	if got, want := len(res.RawTexts), 1; got != want {
+		t.Fatalf("expected %d raw text span, got %d (raw=%+v)", want, got, res.RawTexts)
+	}
+
+	raw := res.RawTexts[0]
+	// With partial matching disabled, "GrosBenoit" remains entirely raw.
+	if raw.Text != " GrosBenoit" || raw.Pos != 2 || raw.Len != len([]rune(" GrosBenoit")) {
+		t.Errorf("unexpected raw text with AllowPartialMatch=false: %+v", raw)
+	}
+
+	// No fragment should overlap the "Benoit" portion.
+	for _, f := range res.Fragments {
+		if f.Pos >= 7 && f.Pos < 13 {
+			t.Fatalf("unexpected fragment inside 'GrosBenoit' when AllowPartialMatch=false: %+v", f)
+		}
+	}
+
+	rendered := renderPhoneticOrRaw(res)
+	if rendered != "lə GrosBenoit" {
+		t.Fatalf("expected rendered text %q, got %q", "lə GrosBenoit", rendered)
+	}
 }
 
 // TestScanTolerantDiacritics ensures that tolerant mode can match an
@@ -105,8 +174,8 @@ func TestScanTolerantDiacritics(t *testing.T) {
 
 	// Explicitly enable diacritic‑insensitive matching.
 	opts := DeterministOptions{
-		DiacriticInsensitive:     true,
-		SingleGraphemeOnlyAsWord: false,
+		DiacriticInsensitive: true,
+		AllowPartialMatch:    true,
 	}
 
 	// Tolerant mode should match and produce a single fragment.
@@ -124,22 +193,26 @@ func TestScanTolerantDiacritics(t *testing.T) {
 	}
 }
 
-// TestScanSingleGraphemeOnlyAsWord verifies that when the
-// SingleGraphemeOnlyAsWord option is enabled, single‑rune dictionary
-// entries are only used for isolated one‑letter words and not inside
-// longer tokens.
-func TestScanSingleGraphemeOnlyAsWord(t *testing.T) {
+// TestAllowPartialMatchControlsSingleGrapheme verifies that the
+// AllowPartialMatch option generalises the previous
+// SingleGraphemeOnlyAsWord behaviour:
+//
+//   - with AllowPartialMatch = true  : the inner "a" of "bar" can be
+//     matched;
+//   - with AllowPartialMatch = false : only the isolated "a" token is
+//     matched.
+func TestAllowPartialMatchControlsSingleGrapheme(t *testing.T) {
 	langDict := phono.Dictionary{
 		"a": {"A"},
 	}
 
 	d := NewDeterminist(langDict)
 
-	// Baseline behaviour: without the option, the inner "a" of "bar"
-	// can be matched using the single‑rune entry "a".
+	// Baseline behaviour: with partial matching allowed, the inner "a"
+	// of "bar" can be matched using the single‑rune entry "a".
 	baseOpts := DeterministOptions{
-		DiacriticInsensitive:     false,
-		SingleGraphemeOnlyAsWord: false,
+		DiacriticInsensitive: false,
+		AllowPartialMatch:    true,
 	}
 	base := d.ScanWithOptions("bar a", baseOpts)
 
@@ -154,23 +227,22 @@ func TestScanSingleGraphemeOnlyAsWord(t *testing.T) {
 		t.Fatalf("baseline: expected a fragment inside 'bar', got %#v", base.Fragments)
 	}
 
-	// With the option enabled, single‑rune entries are only allowed for
-	// isolated one‑letter words ("a" here). The "a" inside "bar" must no
-	// longer be segmented out.
+	// With partial matching disabled, the "a" inside "bar" must no
+	// longer be segmented out; only the isolated "a" token is allowed.
 	opts := DeterministOptions{
-		DiacriticInsensitive:     false,
-		SingleGraphemeOnlyAsWord: true,
+		DiacriticInsensitive: false,
+		AllowPartialMatch:    false,
 	}
 
 	res := d.ScanWithOptions("bar a", opts)
 
 	if got, want := len(res.Fragments), 1; got != want {
-		t.Fatalf("with option: expected %d fragment, got %d (fragments=%#v)", want, got, res.Fragments)
+		t.Fatalf("with AllowPartialMatch=false: expected %d fragment, got %d (fragments=%#v)", want, got, res.Fragments)
 	}
 
 	frag := res.Fragments[0]
 	if frag.Phonetized != "A" || frag.Pos != 4 || frag.Len != 1 {
-		t.Errorf("unexpected fragment with option: %+v", frag)
+		t.Errorf("unexpected fragment with AllowPartialMatch=false: %+v", frag)
 	}
 
 	// "bar " should now remain entirely raw at the beginning.
@@ -179,10 +251,10 @@ func TestScanSingleGraphemeOnlyAsWord(t *testing.T) {
 	}
 }
 
-// TestSingleGraphemeOnlyAsWordIsolated ensures that an isolated
-// one‑letter word is still recognized when SingleGraphemeOnlyAsWord
-// is enabled.
-func TestSingleGraphemeOnlyAsWordIsolated(t *testing.T) {
+// TestAllowPartialMatchIsolatedWord ensures that an isolated
+// one‑letter word is still recognized when AllowPartialMatch is
+// disabled.
+func TestAllowPartialMatchIsolatedWord(t *testing.T) {
 	langDict := phono.Dictionary{
 		"a": {"A"},
 	}
@@ -190,8 +262,8 @@ func TestSingleGraphemeOnlyAsWordIsolated(t *testing.T) {
 	d := NewDeterminist(langDict)
 
 	opts := DeterministOptions{
-		DiacriticInsensitive:     false,
-		SingleGraphemeOnlyAsWord: true,
+		DiacriticInsensitive: false,
+		AllowPartialMatch:    false,
 	}
 
 	res := d.ScanWithOptions("a", opts)
@@ -209,16 +281,15 @@ func TestSingleGraphemeOnlyAsWordIsolated(t *testing.T) {
 	}
 }
 
-// TestSingleGraphemeOnlyAsWordDisabledFullToken validates the full
-// "abcdE" scenario:
+// TestAllowPartialMatchFullToken validates the full "abcdE" scenario:
 //
 //	dict: a→1, b→2, c→3, d→4
 //
-//	- with SingleGraphemeOnlyAsWord = true  : result text is "abcdE"
+//	- with AllowPartialMatch = false : result text is "abcdE"
 //	  (no decomposition inside the longer token);
-//	- with SingleGraphemeOnlyAsWord = false : result text is "1234E"
+//	- with AllowPartialMatch = true  : result text is "1234E"
 //	  (full decomposition into single graphemes + trailing raw 'E').
-func TestSingleGraphemeOnlyAsWordDisabledFullToken(t *testing.T) {
+func TestAllowPartialMatchFullToken(t *testing.T) {
 	langDict := phono.Dictionary{
 		"a": {"1"},
 		"b": {"2"},
@@ -229,38 +300,38 @@ func TestSingleGraphemeOnlyAsWordDisabledFullToken(t *testing.T) {
 	d := NewDeterminist(langDict)
 	text := "abcdE"
 
-	// Case 1: SingleGraphemeOnlyAsWord = true
-	optsIsolated := DeterministOptions{
-		DiacriticInsensitive:     false,
-		SingleGraphemeOnlyAsWord: true,
+	// Case 1: AllowPartialMatch = false
+	optsStrict := DeterministOptions{
+		DiacriticInsensitive: false,
+		AllowPartialMatch:    false,
 	}
-	resIsolated := d.ScanWithOptions(text, optsIsolated)
+	resStrict := d.ScanWithOptions(text, optsStrict)
 
-	if got, want := len(resIsolated.Fragments), 0; got != want {
-		t.Fatalf("isolated=true: expected %d fragments, got %d (%+v)", want, got, resIsolated.Fragments)
+	if got, want := len(resStrict.Fragments), 0; got != want {
+		t.Fatalf("AllowPartialMatch=false: expected %d fragments, got %d (%+v)", want, got, resStrict.Fragments)
 	}
-	if got, want := len(resIsolated.RawTexts), 1; got != want {
-		t.Fatalf("isolated=true: expected %d raw span, got %d (%+v)", want, got, resIsolated.RawTexts)
+	if got, want := len(resStrict.RawTexts), 1; got != want {
+		t.Fatalf("AllowPartialMatch=false: expected %d raw span, got %d (%+v)", want, got, resStrict.RawTexts)
 	}
-	raw := resIsolated.RawTexts[0]
+	raw := resStrict.RawTexts[0]
 	if raw.Text != "abcdE" || raw.Pos != 0 || raw.Len != len([]rune(text)) {
-		t.Errorf("isolated=true: unexpected raw span: %+v", raw)
+		t.Errorf("AllowPartialMatch=false: unexpected raw span: %+v", raw)
 	}
 
-	renderedIsolated := renderPhoneticOrRaw(resIsolated)
-	if renderedIsolated != "abcdE" {
-		t.Fatalf("isolated=true: expected rendered text %q, got %q", "abcdE", renderedIsolated)
+	renderedStrict := renderPhoneticOrRaw(resStrict)
+	if renderedStrict != "abcdE" {
+		t.Fatalf("AllowPartialMatch=false: expected rendered text %q, got %q", "abcdE", renderedStrict)
 	}
 
-	// Case 2: SingleGraphemeOnlyAsWord = false
+	// Case 2: AllowPartialMatch = true
 	optsDecompose := DeterministOptions{
-		DiacriticInsensitive:     false,
-		SingleGraphemeOnlyAsWord: false,
+		DiacriticInsensitive: false,
+		AllowPartialMatch:    true,
 	}
 	resDecompose := d.ScanWithOptions(text, optsDecompose)
 
 	if got, want := len(resDecompose.Fragments), 4; got != want {
-		t.Fatalf("isolated=false: expected %d fragments, got %d (%+v)", want, got, resDecompose.Fragments)
+		t.Fatalf("AllowPartialMatch=true: expected %d fragments, got %d (%+v)", want, got, resDecompose.Fragments)
 	}
 
 	// Fragments should correspond to 1,2,3,4 on a,b,c,d (positions 0..3).
@@ -268,21 +339,186 @@ func TestSingleGraphemeOnlyAsWordDisabledFullToken(t *testing.T) {
 	for i, w := range wantIPA {
 		f := resDecompose.Fragments[i]
 		if f.Phonetized != w || f.Pos != i || f.Len != 1 {
-			t.Errorf("isolated=false: unexpected fragment[%d]: %+v (want Phonetized=%q, Pos=%d, Len=1)", i, f, w, i)
+			t.Errorf("AllowPartialMatch=true: unexpected fragment[%d]: %+v (want Phonetized=%q, Pos=%d, Len=1)", i, f, w, i)
 		}
 	}
 
 	if got, want := len(resDecompose.RawTexts), 1; got != want {
-		t.Fatalf("isolated=false: expected %d raw span, got %d (%+v)", want, got, resDecompose.RawTexts)
+		t.Fatalf("AllowPartialMatch=true: expected %d raw span, got %d (%+v)", want, got, resDecompose.RawTexts)
 	}
 	raw = resDecompose.RawTexts[0]
 	if raw.Text != "E" || raw.Pos != 4 || raw.Len != 1 {
-		t.Errorf("isolated=false: unexpected raw span: %+v (want Text=%q, Pos=%d, Len=%d)", raw, "E", 4, 1)
+		t.Errorf("AllowPartialMatch=true: unexpected raw span: %+v (want Text=%q, Pos=%d, Len=%d)", raw, "E", 4, 1)
 	}
 
 	renderedDecompose := renderPhoneticOrRaw(resDecompose)
 	if renderedDecompose != "1234E" {
-		t.Fatalf("isolated=false: expected rendered text %q, got %q", "1234E", renderedDecompose)
+		t.Fatalf("AllowPartialMatch=true: expected rendered text %q, got %q", "1234E", renderedDecompose)
+	}
+}
+
+// TestDeterministDoesNotDecomposeUnknownSingleWord ensures that when the
+// dictionary only contains internal substrings of an orthographic word,
+// the scanner can be configured (AllowPartialMatch=false) to leave that
+// full token as raw text instead of composing it from sub‑entries
+// (e.g. "Font" + "ena" inside "Fontenay").
+func TestDeterministDoesNotDecomposeUnknownSingleWord(t *testing.T) {
+	langDict := phono.Dictionary{
+		"Font": {"F"},
+		"ena":  {"E"},
+	}
+
+	d := NewDeterminist(langDict)
+	text := "Fontenay"
+
+	res := d.ScanWithOptions(text, DeterministOptions{
+		DiacriticInsensitive: false,
+		AllowPartialMatch:    false,
+	})
+
+	// Desired behaviour: no internal breakdown of "Fontenay" into "Font" + "ena".
+	if got, want := len(res.Fragments), 0; got != want {
+		t.Fatalf("expected %d fragments for %q, got %d (%+v)", want, text, got, res.Fragments)
+	}
+
+	if got, want := len(res.RawTexts), 1; got != want {
+		t.Fatalf("expected %d raw span for %q, got %d (%+v)", want, text, got, res.RawTexts)
+	}
+
+	raw := res.RawTexts[0]
+	if raw.Text != text || raw.Pos != 0 || raw.Len != len([]rune(text)) {
+		t.Errorf("unexpected raw span for %q: %+v (want Text=%q, Pos=0, Len=%d)", text, raw, text, len([]rune(text)))
+	}
+}
+
+// TestDeterministCanDecomposeUnknownSingleWordWhenAllowed ensures that
+// the same "Fontenay" example can be decomposed when partial matching
+// is explicitly enabled.
+func TestDeterministCanDecomposeUnknownSingleWordWhenAllowed(t *testing.T) {
+	langDict := phono.Dictionary{
+		"Font": {"F"},
+		"ena":  {"E"},
+	}
+
+	d := NewDeterminist(langDict)
+	text := "Fontenay"
+
+	res := d.ScanWithOptions(text, DeterministOptions{
+		DiacriticInsensitive: false,
+		AllowPartialMatch:    true,
+	})
+
+	if got, want := len(res.Fragments), 2; got != want {
+		t.Fatalf("expected %d fragments for %q, got %d (%+v)", want, text, got, res.Fragments)
+	}
+
+	frag0 := res.Fragments[0]
+	if frag0.Phonetized != "F" || frag0.Pos != 0 || frag0.Len != 4 {
+		t.Errorf("unexpected first fragment for %q: %+v (want Phonetized=F, Pos=0, Len=4)", text, frag0)
+	}
+
+	frag1 := res.Fragments[1]
+	if frag1.Phonetized != "E" || frag1.Pos != 4 || frag1.Len != 3 {
+		t.Errorf("unexpected second fragment for %q: %+v (want Phonetized=E, Pos=4, Len=3)", text, frag1)
+	}
+
+	if got, want := len(res.RawTexts), 1; got != want {
+		t.Fatalf("expected %d raw span for %q, got %d (%+v)", want, text, got, res.RawTexts)
+	}
+	raw := res.RawTexts[0]
+	if raw.Text != "y" || raw.Pos != 7 || raw.Len != 1 {
+		t.Errorf("unexpected raw span for %q: %+v (want Text=%q, Pos=7, Len=1)", text, raw, "y")
+	}
+}
+
+// TestDeterministStillSupportsMultilingualSequences verifies that even
+// when single words like "Fontenay" must not be decomposed into internal
+// sub‑keys in strict mode, the scanner can still segment scripts where
+// sequences without spaces are the natural tokens (e.g. Japanese or
+// Chinese) when partial matching is allowed.
+func TestDeterministStillSupportsMultilingualSequences(t *testing.T) {
+	langDict := phono.Dictionary{
+		"東京": {"T1"},
+		"大学": {"T2"},
+	}
+
+	d := NewDeterminist(langDict)
+	text := "東京大学"
+
+	// Use the default options (AllowPartialMatch=true).
+	res := d.Scan(text)
+
+	if got, want := len(res.Fragments), 2; got != want {
+		t.Fatalf("expected %d fragments for %q, got %d (%+v)", want, text, got, res.Fragments)
+	}
+
+	frag0 := res.Fragments[0]
+	if frag0.Phonetized != "T1" || frag0.Pos != 0 || frag0.Len != 2 {
+		t.Errorf("unexpected first fragment for %q: %+v (want Phonetized=T1, Pos=0, Len=2)", text, frag0)
+	}
+
+	frag1 := res.Fragments[1]
+	if frag1.Phonetized != "T2" || frag1.Pos != 2 || frag1.Len != 2 {
+		t.Errorf("unexpected second fragment for %q: %+v (want Phonetized=T2, Pos=2, Len=2)", text, frag1)
+	}
+
+	if len(res.RawTexts) != 0 {
+		t.Errorf("expected no raw text for %q, got %+v", text, res.RawTexts)
+	}
+}
+
+// TestDeterministCustomDelimiters verifies that the SetDelimiters API
+// correctly influences what is considered an "expression boundary" when
+// AllowPartialMatch=false.
+func TestDeterministCustomDelimiters(t *testing.T) {
+	langDict := phono.Dictionary{
+		"foo": {"F"},
+		"bar": {"B"},
+	}
+
+	d := NewDeterminist(langDict)
+	text := "foo,bar"
+
+	// Default delimiters: comma acts as a delimiter (punctuation), so
+	// both "foo" and "bar" can be matched as separate expressions when
+	// AllowPartialMatch=false.
+	resDefault := d.ScanWithOptions(text, DeterministOptions{
+		DiacriticInsensitive: false,
+		AllowPartialMatch:    false,
+	})
+
+	if got, want := len(resDefault.Fragments), 2; got != want {
+		t.Fatalf("default delimiters: expected %d fragments, got %d (%+v)", want, got, resDefault.Fragments)
+	}
+
+	frag0 := resDefault.Fragments[0]
+	if frag0.Phonetized != "F" || frag0.Pos != 0 || frag0.Len != 3 {
+		t.Errorf("default delimiters: unexpected first fragment: %+v", frag0)
+	}
+	frag1 := resDefault.Fragments[1]
+	if frag1.Phonetized != "B" || frag1.Pos != 4 || frag1.Len != 3 {
+		t.Errorf("default delimiters: unexpected second fragment: %+v", frag1)
+	}
+
+	// Custom delimiters: only space is a delimiter, comma is no longer
+	// a boundary. "foo,bar" becomes a single expression; with
+	// AllowPartialMatch=false there should be no match.
+	d.SetDelimiters([]rune{' '})
+
+	resCustom := d.ScanWithOptions(text, DeterministOptions{
+		DiacriticInsensitive: false,
+		AllowPartialMatch:    false,
+	})
+
+	if got, want := len(resCustom.Fragments), 0; got != want {
+		t.Fatalf("custom delimiters: expected %d fragments, got %d (%+v)", want, got, resCustom.Fragments)
+	}
+	if got, want := len(resCustom.RawTexts), 1; got != want {
+		t.Fatalf("custom delimiters: expected %d raw span, got %d (%+v)", want, got, resCustom.RawTexts)
+	}
+	raw := resCustom.RawTexts[0]
+	if raw.Text != text || raw.Pos != 0 || raw.Len != len([]rune(text)) {
+		t.Errorf("custom delimiters: unexpected raw span: %+v", raw)
 	}
 }
 
