@@ -1,6 +1,7 @@
 package g2p
 
 import (
+	"context"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -46,6 +47,12 @@ type FrenchLiaisonProcessor struct {
 	forbidBefore map[string]struct{} // words that block liaison after them (e.g. "et")
 	hAspire      map[string]struct{} // words with h aspiré (no liaison before)
 }
+
+// Ensure FrenchLiaisonProcessor implements the pipeline interfaces.
+var (
+	_ Processor            = (*FrenchLiaisonProcessor)(nil)
+	_ CancellableProcessor = (*FrenchLiaisonProcessor)(nil)
+)
 
 // NewFrenchLiaisonProcessor returns a processor configured with a
 // conservative rule set: liaison is only applied after a small list of
@@ -109,13 +116,45 @@ func newFrenchLiaisonProcessor(allowLoose bool) *FrenchLiaisonProcessor {
 	return p
 }
 
-// Apply takes a g2p Result and returns a new Result in which liaison
+// Apply implements Processor. It calls the internal helper apply once
+// and returns its result.
+func (p *FrenchLiaisonProcessor) Apply(res Result) Result {
+	return p.apply(res)
+}
+
+// StreamApply implements CancellableProcessor. It emits a single
+// Result on the returned channel and observes ctx cancellation.
+func (p *FrenchLiaisonProcessor) StreamApply(ctx context.Context, input Result) <-chan Result {
+	out := make(chan Result, 1)
+
+	go func() {
+		defer close(out)
+
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		res := p.apply(input)
+
+		select {
+		case <-ctx.Done():
+			return
+		case out <- res:
+		}
+	}()
+
+	return out
+}
+
+// apply takes a g2p Result and returns a new Result in which liaison
 // consonants have been inserted into the Phonetized fields of fragments
 // when appropriate.
 //
 // The original text and fragment positions are preserved. Only the
 // Phonetized strings are modified.
-func (p *FrenchLiaisonProcessor) Apply(res Result) Result {
+func (p *FrenchLiaisonProcessor) apply(res Result) Result {
 	if len(res.Text) == 0 || len(res.Fragments) == 0 {
 		return res
 	}
@@ -182,17 +221,7 @@ func (p *FrenchLiaisonProcessor) Apply(res Result) Result {
 	return out
 }
 
-// ApplyFrenchLiaison is a convenience helper that uses the conservative
-// processor configuration (no loose fallback).
-func ApplyFrenchLiaison(res Result) Result {
-	return NewFrenchLiaisonProcessor().Apply(res)
-}
-
-// ApplyFrenchLiaisonWithFallback is a helper that enables the looser
-// "final consonant" heuristic for liaison givers.
-func ApplyFrenchLiaisonWithFallback(res Result) Result {
-	return NewFrenchLiaisonProcessorWithFallback().Apply(res)
-}
+// --- The rest of the file (tokens, helpers, etc.) stays identical ---
 
 // orthToken represents a single orthographic word (sequence of letters
 // and possibly apostrophes) in the original text, along with its rune

@@ -1,7 +1,7 @@
 // Package phonodict provides helpers to preload, merge and represent
 // pronunciation dictionaries. It supports multiple input formats via
 // pluggable "Loader" implementations and exposes a functional API
-// for line-based textual preloaders.
+// for line-based textual loaders
 package phono
 
 import (
@@ -25,7 +25,7 @@ type AnnotatedPhonetized struct {
 type Dictionary map[Expression][]IPA
 
 // Representation holds the internal dictionary representation used
-// by the scanner and the preloaders.
+// by the scanner and the loaders.
 type Representation struct {
 	Entries        Dictionary
 	SeenWordPron   map[string]struct{}

@@ -10,449 +10,283 @@ import (
 	"github.com/temporal-IPA/tipa/pkg/phono"
 )
 
+// DeterministOptions control the behavior of a single Determinist run.
+//
+// Options are attached to a Determinist instance and can also be
+// overridden per call via ScanWithOptions.
+type DeterministOptions struct {
+	// DiacriticInsensitive enables the diacritic‑insensitive matching pass.
+	//
+	// When true, spans that remain unmatched after the strict pass are
+	// rescanned using a diacritic‑insensitive normalization so that
+	// "garcon" can match "garçon", etc.
+	DiacriticInsensitive bool
+
+	// SingleGraphemeOnlyAsWord restricts the use of single‑rune dictionary
+	// entries to isolated one‑letter words.
+	//
+	// When true, entries whose key is a single rune are only matched when
+	// that rune does not appear inside a longer alphanumeric token. This
+	// prevents single‑letter keys from being used to decompose arbitrary
+	// unknown words character by character, while still allowing them for
+	// genuine one‑letter words such as "a".
+	SingleGraphemeOnlyAsWord bool
+}
+
 // Determinist is a greedy, dictionary‑based grapheme‑to‑phoneme (g2p)
 // processor.
 //
-// It works with two dictionaries per language:
+// It works with a single dictionary per instance. To model multi‑stage
+// pipelines (large lexicon, then tolerant fallback, then grapheme /
+// diphone dictionary), instantiate several Determinist processors with
+// different dictionaries and options and chain them using the Processor
+// interface:
 //
-//   - langDict: a large lexicon that should cover most real‑world tokens
-//     and expressions. Keys can be single words ("se") or multi‑word
-//     sequences that include spaces and punctuation
-//     ("à cette différence près que").
+//	res0 := Result{Text: text, RawTexts: []RawText{{Text: text, Pos: 0, Len: len([]rune(text))}}}
+//	res1 := detStrict.Apply(res0)
+//	res2 := detTolerant.Apply(res1)
+//	res3 := detGraphemes.Apply(res2)
 //
-//   - finalDict: a smaller "fallback" dictionary used to fill gaps with
-//     generic pronunciations for characters, syllables, or short chunks.
-//
-// The scanner always walks the input text from left to right and, at
-// each rune position, tries to match **the longest possible dictionary
-// key**, up to the precomputed MaxKeyLen of the dictionary. This gives
-// multi‑word entries priority over shorter sub‑entries, e.g. it will
-// match:
-//
-//	"à cette différence près que"
-//
-// as a single fragment instead of matching shorter keys like "à" or
-// "à cette", as long as the full expression exists in the dictionary.
+// Each stage only processes the RawTexts left by the previous ones.
 //
 // Matching is done on normalized forms:
 //
-//   - First stage: NormalizeString (lowercased, trimmed).
-//   - Optional tolerant stage: diacritic‑insensitive normalization
+//   - strict pass: NormalizeString (lowercased, trimmed);
+//   - optional tolerant pass: diacritic‑insensitive normalization
 //     (NormalizeString + diacritic removal), used only on spans that
 //     were not recognized in the strict pass.
 //
-// Any text that cannot be matched is returned as RawText so that callers
-// can inspect or post‑process it.
+// Any text that cannot be matched is returned as RawText so that
+// callers can inspect or post‑process it.
 //
 // When several dictionary entries / pronunciations match the same
 // surface span, all variants are preserved as individual Fragment
 // instances that share the same Pos / Len but differ by Phonetized,
-// Variant, and (optionally) Confidence. The ordering of variants for a
-// given span is stable and reflects their relative confidence.
+// Variant, and Confidence. The ordering of variants for a given span
+// is stable and reflects their relative confidence.
 type Determinist struct {
-	// langDict is the main phonetic dictionary for the language.
+	// langDict is the main phonetic dictionary for the processor.
 	langDict phono.Dictionary
 	// langDictNormKeyMap maps normalized surface forms to the original
-	// langDict keys that share the same normalization (strict lowercase view).
+	// dictionary keys that share the same normalization (strict lowercase view).
 	langDictNormKeyMap phono.KeyMap
 	// langTolerantKeyMap is the diacritic‑insensitive view of langDict.
-	// It is built once in NewDeterminist and reused for every tolerant scan.
+	// It is built once in the constructor and reused for every tolerant pass.
 	langTolerantKeyMap phono.KeyMap
 	// langMaxKeyLen caches the maximum key length (in runes) of langDict.
 	langMaxKeyLen int
 
-	// finalDict is an optional fallback dictionary that contains short
-	// character sequences used to fill holes left by langDict.
-	finalDict phono.Dictionary
-	// finalDictNormKeyMap is the normalized (lowercased) view of finalDict.
-	finalDictNormKeyMap phono.KeyMap
-	// finalTolerantKeyMap is the diacritic‑insensitive view of finalDict.
-	finalTolerantKeyMap phono.KeyMap
-	// finalMaxKeyLen caches the maximum key length (in runes) of finalDict.
-	finalMaxKeyLen int
+	// options is the default configuration used by Scan / Apply.
+	options DeterministOptions
 
 	// picker encapsulates the strategy used to select pronunciations
 	// (and their relative confidence) for a given surface span.
 	picker Picker
 }
 
-// streamedResult is an internal helper type used by the channel‑based
-// scanning implementation. It carries a per‑line Result together with
-// bookkeeping information needed to reconstruct positions in the
-// original multi‑line text.
-type streamedResult struct {
-	// Result contains the phonetic analysis for a single logical line
-	// (without the trailing newline).
-	Result Result
+// Ensure Determinist implements the pipeline interfaces.
+var (
+	_ Processor            = (*Determinist)(nil)
+	_ CancellableProcessor = (*Determinist)(nil)
+)
 
-	// startOffset is the rune offset of the first rune of Result.Text
-	// in the original input string.
-	startOffset int
-
-	// hasTrailingNewline reports whether this line in the original text
-	// was immediately followed by a '\n' rune. When true, Scan() emits
-	// a RawText span for that newline so that behaviour matches the
-	// non‑streaming implementation.
-	hasTrailingNewline bool
+// DefaultDeterministOptions are the defaults used by NewDeterminist.
+//
+// They correspond to a strict scan:
+//   - DiacriticInsensitive: false (no tolerant pass)
+//   - SingleGraphemeOnlyAsWord: false (single‑rune entries may be used
+//     inside longer tokens).
+var DefaultDeterministOptions = DeterministOptions{
+	DiacriticInsensitive:     false,
+	SingleGraphemeOnlyAsWord: false,
 }
 
-// NewDeterminist creates a new Determinist g2p processor instance.
-//
-// langDict is the main, usually large, lexicon. final may be nil; when
-// non‑nil it is used as a second‑stage dictionary to rescan unmatched
-// text spans and fill small gaps.
-//
-// For efficiency, the constructor precomputes:
-//   - The normalized key maps for langDict and finalDict.
-//   - Diacritic‑insensitive key maps (for tolerant scans).
-//   - MaxKeyLen for both dictionaries.
-func NewDeterminist(langDict phono.Dictionary, final phono.Dictionary) *Determinist {
+// NewDeterminist creates a new Determinist with the given dictionary
+// and DefaultDeterministOptions (strict mode).
+func NewDeterminist(langDict phono.Dictionary) *Determinist {
+	return NewDeterministWithOptions(langDict, DefaultDeterministOptions)
+}
+
+// NewDeterministWithOptions creates a Determinist bound to langDict and
+// configured with the provided options.
+func NewDeterministWithOptions(langDict phono.Dictionary, opts DeterministOptions) *Determinist {
 	langNorm := langDict.NormalizedKeys()
-	g := &Determinist{
+	d := &Determinist{
 		langDict:           langDict,
 		langDictNormKeyMap: langNorm,
 		langMaxKeyLen:      langDict.MaxKeyLen(),
-		finalDict:          final,
+		options:            opts,
 		picker:             Picker{},
 	}
 
 	if len(langNorm) > 0 {
-		g.langTolerantKeyMap = buildDiacriticInsensitiveKeyMap(langNorm)
+		d.langTolerantKeyMap = buildDiacriticInsensitiveKeyMap(langNorm)
 	}
 
-	if final != nil {
-		finalNorm := final.NormalizedKeys()
-		g.finalDictNormKeyMap = finalNorm
-		g.finalMaxKeyLen = final.MaxKeyLen()
-		if len(finalNorm) > 0 {
-			g.finalTolerantKeyMap = buildDiacriticInsensitiveKeyMap(finalNorm)
-		}
-	}
-
-	return g
+	return d
 }
 
-// Scan converts the given text into phonetic fragments and raw spans.
-//
-// The method runs in up to two dictionary stages, each of which can
-// itself perform one or two normalization passes:
-//
-//  1. Main dictionary (langDict):
-//     - Strict pass (always): greedy longest‑match scan using
-//     NormalizeString (lowercase + trim).
-//     - Tolerant pass (optional): only if tolerant==true and some
-//     spans were left as RawText by the strict pass. Those raw spans
-//     are rescanned using a diacritic‑insensitive normalization.
-//     This makes "garcon" match a dictionary entry "garçon", etc.
-//
-//  2. Final dictionary (finalDict, optional):
-//     - The RawText spans left after stage 1 are rescanned with
-//     finalDict using the same strict/tolerant pipeline.
-//     - Any fragments found are merged with the original fragments,
-//     with positions adjusted so that Fragment.Pos / RawText.Pos
-//     are expressed as rune offsets in the original text.
-//
-// The returned Fragments slice is sorted by Pos (ascending). For equal
-// positions, fragments with longer Len come first; for identical spans
-// (same Pos and Len), variants are ordered by decreasing Confidence and
-// then by Variant index. RawTexts are merged so that at most one
-// RawText covers any contiguous region of unmatched text.
-//
-// Internally, Scan now uses the same channel‑based, line‑oriented
-// implementation as StreamScan and then merges all per‑line results
-// back into a single Result that refers to the original multi‑line
-// input.
-func (d Determinist) Scan(text string, tolerant bool) Result {
-	// Use a background context here; callers who need cancellation or
-	// incremental consumption should use StreamScan directly.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+// Options returns the current default options of the Determinist.
+func (d *Determinist) Options() DeterministOptions {
+	return d.options
+}
 
-	var allFragments []Fragment
-	var allRawTexts []RawText
+// SetOptions changes the default options used by Scan / Apply.
+func (d *Determinist) SetOptions(opts DeterministOptions) {
+	d.options = opts
+}
 
-	// streamScanWithOffsets performs the actual line‑by‑line scanning
-	// and sends one streamedResult per logical line.
-	for sr := range d.streamScanWithOffsets(ctx, text, tolerant) {
-		res := sr.Result
+// Scan is a convenience helper that runs the Determinist on raw text
+// using its current default options.
+//
+// It is equivalent to:
+//
+//	opts := d.Options()
+//	d.ScanWithOptions(text, opts)
+func (d *Determinist) Scan(text string) Result {
+	return d.ScanWithOptions(text, d.options)
+}
 
-		// Rebase fragment positions from line‑relative offsets to rune
-		// offsets in the original text.
-		for _, f := range res.Fragments {
-			adjusted := f
-			adjusted.Pos += sr.startOffset
-			allFragments = append(allFragments, adjusted)
+// ScanWithOptions converts the given text into phonetic fragments and
+// raw spans, using the provided options.
+//
+// It is implemented on top of the Processor API: the text is wrapped
+// in a Result that contains a single RawText covering the entire
+// string, and then Apply is called with the given options.
+func (d *Determinist) ScanWithOptions(text string, opts DeterministOptions) Result {
+	initial := Result{
+		Text: text,
+	}
+
+	runes := []rune(text)
+	if len(runes) > 0 {
+		initial.RawTexts = []RawText{{
+			Text: text,
+			Pos:  0,
+			Len:  len(runes),
+		}}
+	}
+
+	return d.applyWithOptions(initial, opts)
+}
+
+// Apply implements the Processor interface.
+//
+// It scans only the RawTexts of the input Result using the
+// Determinist's current options and dictionary:
+//
+//   - existing Fragments are preserved;
+//   - new Fragments are added for portions of RawTexts that can be
+//     recognized;
+//   - RawTexts are replaced by the unmatched portions of those spans.
+//
+// This makes it easy to chain multiple Determinist instances with
+// different dictionaries / options.
+func (d *Determinist) Apply(input Result) Result {
+	return d.applyWithOptions(input, d.options)
+}
+
+// StreamApply implements the CancellableProcessor interface.
+//
+// The current implementation emits a single Result on the returned
+// channel. Cancellation is observed before and after the processing.
+func (d *Determinist) StreamApply(ctx context.Context, input Result) <-chan Result {
+	out := make(chan Result, 1)
+
+	go func() {
+		defer close(out)
+
+		select {
+		case <-ctx.Done():
+			return
+		default:
 		}
 
-		// Same for raw text spans produced while scanning the line.
-		for _, rt := range res.RawTexts {
-			adjusted := rt
-			adjusted.Pos += sr.startOffset
-			allRawTexts = append(allRawTexts, adjusted)
+		res := d.applyWithOptions(input, d.options)
+
+		select {
+		case <-ctx.Done():
+			return
+		case out <- res:
+		}
+	}()
+
+	return out
+}
+
+// applyWithOptions is the internal implementation used by ScanWithOptions,
+// Apply, and StreamApply.
+//
+// It processes all RawTexts of the input Result independently, using
+// the same dictionary and options, then merges the newly discovered
+// fragments and leftover raw spans.
+func (d *Determinist) applyWithOptions(input Result, opts DeterministOptions) Result {
+	// Nothing to do if there is no text or no raw spans.
+	if len(input.Text) == 0 || len(input.RawTexts) == 0 {
+		return input
+	}
+
+	out := input
+
+	// Start from existing fragments.
+	out.Fragments = make([]Fragment, len(input.Fragments))
+	copy(out.Fragments, input.Fragments)
+
+	newRawTexts := make([]RawText, 0, len(input.RawTexts))
+
+	for _, raw := range input.RawTexts {
+		// Scan the raw span in its own coordinate system (positions start at 0).
+		frag, leftover := d.scan(raw.Text, opts, input.Text)
+
+		// Rebase fragment positions to the original text coordinates.
+		for _, f := range frag {
+			f.Pos += raw.Pos
+			out.Fragments = append(out.Fragments, f)
 		}
 
-		// When the original text had a '\n' right after this line, keep
-		// it as a RawText span so that the behaviour matches the original
-		// single‑pass Scan implementation.
-		if sr.hasTrailingNewline {
-			newlinePos := sr.startOffset + len([]rune(res.Text))
-			allRawTexts = append(allRawTexts, RawText{
-				Text: "\n",
-				Pos:  newlinePos,
-				Len:  1,
-			})
+		// Rebase leftover raw spans as well.
+		if len(leftover) == 0 {
+			continue
+		}
+		for _, rt := range leftover {
+			rt.Pos += raw.Pos
+			newRawTexts = append(newRawTexts, rt)
 		}
 	}
 
 	// Global ordering and merging guarantees.
-	sortFragments(allFragments)
-	allRawTexts = mergeRawTexts(allRawTexts)
-
-	return Result{
-		Text:      text,
-		Fragments: allFragments,
-		RawTexts:  allRawTexts,
-	}
-}
-
-// StreamScan scans the input text line by line and returns a read‑only
-// channel of Result values.
-//
-// Each emitted Result corresponds to a single logical line of the
-// original text, i.e. the runes between two '\n' delimiters, without
-// the trailing newline itself. Fragment.Pos and RawText.Pos are rune
-// offsets relative to the beginning of that line.
-//
-// The returned channel is closed once all lines have been processed or
-// the context is cancelled. Cancellation is observed between lines;
-// a very long single line is processed atomically.
-func (d Determinist) StreamScan(ctx context.Context, text string, tolerant bool) <-chan Result {
-	out := make(chan Result)
-
-	internal := d.streamScanWithOffsets(ctx, text, tolerant)
-
-	go func() {
-		defer close(out)
-
-		for sr := range internal {
-			select {
-			case <-ctx.Done():
-				return
-			case out <- sr.Result:
-			}
-		}
-	}()
+	sortFragments(out.Fragments)
+	out.RawTexts = mergeRawTexts(newRawTexts)
 
 	return out
-}
-
-// streamScanWithOffsets is the internal streaming implementation used
-// by both Scan (which merges back to a single Result) and StreamScan
-// (which exposes per‑line Results). It walks the input in rune space,
-// splits it on '\n', and for each logical line:
-//
-//   - runs the full single‑line pipeline (scanText);
-//   - sends a streamedResult containing the per‑line Result, its rune
-//     start offset in the original text, and whether it was followed
-//     by a newline in the original text.
-func (d Determinist) streamScanWithOffsets(ctx context.Context, text string, tolerant bool) <-chan streamedResult {
-	out := make(chan streamedResult)
-	go func() {
-		defer close(out)
-
-		if len(text) == 0 {
-			// Empty input: nothing to emit, keep Scan behaviour consistent.
-			return
-		}
-
-		runes := []rune(text)
-		n := len(runes)
-
-		lineStart := 0
-
-		for i := 0; i < n; i++ {
-			if runes[i] == '\n' {
-				// The logical line is the slice [lineStart, i) (possibly empty).
-				lineText := string(runes[lineStart:i])
-
-				// Observe cancellation between lines.
-				if err := ctx.Err(); err != nil {
-					return
-				}
-
-				res := d.scanText(lineText, tolerant)
-
-				// This line in the original text is immediately followed
-				// by a newline.
-				select {
-				case <-ctx.Done():
-					return
-				case out <- streamedResult{
-					Result:             res,
-					startOffset:        lineStart,
-					hasTrailingNewline: true,
-				}:
-				}
-
-				lineStart = i + 1
-			}
-		}
-
-		// Final segment after the last newline (if any). When the text
-		// ends with '\n', lineStart == n and there is no additional line
-		// after the trailing newline, which matches the behaviour of the
-		// original non‑streaming Scan.
-		if lineStart < n {
-			lineText := string(runes[lineStart:n])
-
-			if err := ctx.Err(); err != nil {
-				return
-			}
-
-			res := d.scanText(lineText, tolerant)
-
-			select {
-			case <-ctx.Done():
-				return
-			case out <- streamedResult{
-				Result:             res,
-				startOffset:        lineStart,
-				hasTrailingNewline: false,
-			}:
-			}
-		}
-	}()
-
-	return out
-}
-
-// scanText runs the full two‑stage pipeline (langDict + optional
-// finalDict) on a single text string and returns the corresponding
-// Result. It is the non‑streaming core used for each logical line.
-//
-// The behaviour is equivalent to the original Scan implementation
-// applied to that string: greedy longest‑match scan on langDict,
-// optional tolerant pass, then optional rescan of raw spans with
-// finalDict, followed by global fragment ordering and raw‑text merge.
-func (d Determinist) scanText(text string, tolerant bool) Result {
-	////////////////////////////////////////
-	// #1 Scan the text using the langDict.
-	// This is the main phase and should recognize the majority of the text.
-	////////////////////////////////////////
-
-	fragments, rawTexts := d.scan(
-		text,
-		d.langDict,
-		d.langDictNormKeyMap,
-		d.langTolerantKeyMap,
-		d.langMaxKeyLen,
-		tolerant,
-		text,
-	)
-
-	////////////////////////////////////////////
-	// #2 Scan the remaining raw texts with the final dictionary (if any).
-	// Each raw text is rescanned and can generate:
-	//   - additional fragments (subFragments)
-	//   - new raw texts (subRawTexts) that replace the original raw segment
-	////////////////////////////////////////////
-
-	var finalFragments []Fragment
-	var finalRawText []RawText
-
-	if len(rawTexts) > 0 && d.finalDict != nil {
-		// Start from the fragments already found in phase #1.
-		finalFragments = fragments
-
-		// finalRawText will be rebuilt from the rawTexts slice,
-		// replacing each original RawText by its eventual subRawTexts.
-		finalRawText = make([]RawText, 0, len(rawTexts))
-
-		for _, rawText := range rawTexts {
-			subFragments, subRawTexts := d.scan(
-				rawText.Text,
-				d.finalDict,
-				d.finalDictNormKeyMap,
-				d.finalTolerantKeyMap,
-				d.finalMaxKeyLen,
-				tolerant,
-				text,
-			)
-
-			// If fragments are found inside this raw text, add them to the
-			// final fragment list with adjusted positions.
-			for _, sub := range subFragments {
-				sub.Pos = rawText.Pos + sub.Pos
-				finalFragments = append(finalFragments, sub)
-			}
-
-			// If the second scan still has raw texts, they replace the original rawText.
-			if len(subRawTexts) > 0 {
-				for _, sub := range subRawTexts {
-					sub.Pos = rawText.Pos + sub.Pos
-					finalRawText = append(finalRawText, sub)
-				}
-			} else {
-				// No better decomposition was found for this raw text,
-				// so keep the original one.
-				finalRawText = append(finalRawText, rawText)
-			}
-		}
-	} else {
-		// No second stage: keep the initial scan result as‑is.
-		finalFragments = fragments
-		finalRawText = rawTexts
-	}
-
-	// Ensure the same ordering and merging guarantees as scan().
-	sortFragments(finalFragments)
-	finalRawText = mergeRawTexts(finalRawText)
-
-	return Result{
-		Text:      text,
-		Fragments: finalFragments,
-		RawTexts:  finalRawText,
-	}
 }
 
 // scan applies the two‑pass (strict + tolerant) pipeline for a single
-// dictionary:
+// dictionary on the given text string, using the Determinist's
+// dictionary views and the provided options.
 //
-//   - strict pass: NormalizeString (lowercase) view of the dictionary;
-//   - tolerant pass (optional): diacritic‑insensitive view, applied
-//     only to the RawText spans left by the strict pass.
-//
-// The dictionary‑specific parameters (key maps and MaxKeyLen) are
-// provided so that the same logic can be reused for langDict and
-// finalDict.
-//
-// The "line" parameter is the full line of text being processed (the
-// same value that was passed to Scan). It is forwarded to the Picker
-// so that more context‑sensitive selection heuristics can be added
-// without changing the scanning logic.
-func (d Determinist) scan(
+// Positions in the returned fragments and raw spans are rune offsets
+// relative to the beginning of text.
+func (d *Determinist) scan(
 	text string,
-	dictionary phono.Dictionary,
-	normKeyMap phono.KeyMap,
-	tolerantKeyMap phono.KeyMap,
-	maxKeyLen int,
-	tolerant bool,
+	opts DeterministOptions,
 	line string,
 ) ([]Fragment, []RawText) {
 	// Strict pass (lowercase).
 	fragments, rawTexts := d.scanSegment(
 		text,
 		0,
-		dictionary,
-		normKeyMap,
-		maxKeyLen,
+		d.langDict,
+		d.langDictNormKeyMap,
+		d.langMaxKeyLen,
 		phono.NormalizeString,
 		1.0,
 		line,
+		opts,
 	)
 
 	// If tolerant mode is disabled or everything was recognized, we are done.
-	if !tolerant || len(rawTexts) == 0 || len(tolerantKeyMap) == 0 {
+	if !opts.DiacriticInsensitive || len(rawTexts) == 0 || len(d.langTolerantKeyMap) == 0 {
 		sortFragments(fragments)
 		rawTexts = mergeRawTexts(rawTexts)
 		return fragments, rawTexts
@@ -468,12 +302,13 @@ func (d Determinist) scan(
 		segFrags, segRaws := d.scanSegment(
 			rt.Text,
 			rt.Pos,
-			dictionary,
-			tolerantKeyMap,
-			maxKeyLen,
+			d.langDict,
+			d.langTolerantKeyMap,
+			d.langMaxKeyLen,
 			tolerantNormalize,
 			0.9,
 			line,
+			opts,
 		)
 
 		if len(segFrags) == 0 {
@@ -525,15 +360,10 @@ func (d Determinist) scan(
 //  4. If no candidate matches, the current rune is absorbed into the
 //     current RawText span and i is advanced by one.
 //
-// This strategy ensures that:
-//   - multi‑word expressions are recognized as a single fragment when
-//     they are present in the dictionary;
-//   - shorter keys such as "à" or "à cette" are only used when no
-//     longer key starting at the same position exists;
-//   - trailing spaces are never absorbed into fragments just because
-//     NormalizeString trims them (matches never start or end on
-//     whitespace).
-func (d Determinist) scanSegment(
+// When opts.SingleGraphemeOnlyAsWord is true, single‑rune dictionary
+// entries are only used when they form an isolated one‑letter word
+// (i.e. they are not surrounded by other letters or digits).
+func (d *Determinist) scanSegment(
 	text string,
 	offset int,
 	dictionary phono.Dictionary,
@@ -542,6 +372,7 @@ func (d Determinist) scanSegment(
 	normalizeCandidate func(string) string,
 	passConfidence float64,
 	line string,
+	opts DeterministOptions,
 ) ([]Fragment, []RawText) {
 	runes := []rune(text)
 	n := len(runes)
@@ -595,6 +426,12 @@ func (d Determinist) scanSegment(
 			// fragments swallowing trailing spaces that would be trimmed
 			// away by NormalizeString.
 			if unicode.IsSpace(runes[i+l-1]) {
+				continue
+			}
+
+			// Optional restriction: prevent single‑rune dictionary entries
+			// from being used inside longer alphanumeric tokens.
+			if opts.SingleGraphemeOnlyAsWord && l == 1 && !isIsolatedSingleRuneWord(runes, i) {
 				continue
 			}
 
@@ -659,6 +496,40 @@ func (d Determinist) scanSegment(
 	}
 
 	return fragments, rawTexts
+}
+
+// isIsolatedSingleRuneWord reports whether the rune at position i in
+// the slice represents a one‑letter "word" for the purposes of the
+// SingleGraphemeOnlyAsWord option.
+//
+// A rune is considered an isolated word if:
+//   - it is itself a letter or a digit, and
+//   - the previous rune (if any) is not a letter or digit,
+//   - the next rune (if any) is not a letter or digit.
+func isIsolatedSingleRuneWord(runes []rune, i int) bool {
+	if i < 0 || i >= len(runes) {
+		return false
+	}
+
+	if !isAlnumRune(runes[i]) {
+		return false
+	}
+
+	if i > 0 && isAlnumRune(runes[i-1]) {
+		return false
+	}
+	if i+1 < len(runes) && isAlnumRune(runes[i+1]) {
+		return false
+	}
+
+	return true
+}
+
+// isAlnumRune reports whether r is considered part of an alphanumeric
+// token (letter or digit) for the purposes of
+// SingleGraphemeOnlyAsWord.
+func isAlnumRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsNumber(r)
 }
 
 // buildDiacriticInsensitiveKeyMap constructs a diacritic‑insensitive view of
