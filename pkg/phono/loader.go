@@ -11,12 +11,12 @@ import (
 func init() {
 	// Built-in loaders, ordered from most specific to most generic.
 	textSlashed := NewLineLoader(
-		KindTxtSlashedIpa,
-		sniffTxtSlashedIpa,
-		parseTxtSlashedIpaLine,
+		KindSlashedTxt,
+		sniffSlashedTxt,
+		parseSlashedTxtLine,
 	)
 	textNative := NewLineLoader(
-		KindTxtIpa,
+		KindPipedTxt,
 		sniffTextIpa,
 		parseTextIpaLine,
 	)
@@ -28,16 +28,16 @@ func init() {
 		gobPL,
 	}
 
-	// Fallback to the native ipa text preloader when sniffing is inconclusive.
+	// Fallback to the native text preloader when sniffing is inconclusive.
 	defaultLoader = textNative
 }
 
 // OnEntryFunc is called by a Loader for each dictionary entry
-// (word, pronunciations).
-type OnEntryFunc func(word string, prons []string) error
+// (expression, phonetic forms).
+type OnEntryFunc func(expression string, phones []string) error
 
 // Loader parses a dictionary source (file or bytes) and emits
-// (word, pronunciations) entries through the provided callback.
+// (expression, phonetic forms) entries through the provided callback.
 type Loader interface {
 	// Kind returns a short identifier for the preloader.
 	Kind() Kind
@@ -49,10 +49,10 @@ type Loader interface {
 	// - isEOF: true if sniff contains the full source.
 	Sniff(sniff []byte, isEOF bool) bool
 
-	// Load parses the entire source from r and calls emit for each entry found
+	// Load parses the entire source from r and calls emit for each entry found.
 	Load(r io.Reader, emit OnEntryFunc) error
 
-	// LoadAll loads all the dictionary
+	// LoadAll loads the entire dictionary into memory.
 	// May be more efficient for pure loaders like GOB.
 	LoadAll(r io.Reader) (Dictionary, error)
 }
@@ -63,7 +63,7 @@ var (
 )
 
 // RegisterLoader allows external code to add additional Loaders
-// (for example Lexique, Flexique, etc.). Preloaders are consulted in
+// (for example Lexique, Flexique, etc.). Loaders are consulted in
 // registration order during sniffing.
 func RegisterLoader(p Loader) {
 	if p == nil {
@@ -73,8 +73,7 @@ func RegisterLoader(p Loader) {
 }
 
 // selectLoader chooses the first preloader whose Sniff method returns true.
-// If none match, it falls back to defaultLoader (the "native"
-// text format).
+// If none match, it falls back to defaultLoader (the native text format).
 func selectLoader(sniff []byte, isEOF bool) Loader {
 	for _, p := range builtinLoaders {
 		if p.Sniff(sniff, isEOF) {
@@ -88,10 +87,6 @@ func selectLoader(sniff []byte, isEOF bool) Loader {
 //
 // The same MergeMode semantics used by the scanner are applied between
 // the preloaded dictionaries themselves, and the order of paths is respected.
-//
-// It returns the combined internal representation: entries, seenWordPron
-// and preloadedWords (the set of words that originate from any preloaded
-// dictionary).
 func LoadPaths(fs fs.FS, mode MergeMode, paths ...string) (Dictionary, error) {
 	rep := NewRepresentation()
 	if err := LoadInto(fs, rep, mode, paths...); err != nil {
@@ -127,10 +122,6 @@ func LoadBlobs(mode MergeMode, blobs ...[]byte) (Dictionary, error) {
 
 // LoadInto preloads and merges dictionaries from a sequence of file paths
 // into an existing Representation.
-//
-// This is useful when you want to reuse a single Representation across
-// multiple sources (dumps, dictionaries, etc.) and keep consistent
-// merge semantics.
 func LoadInto(fs fs.FS, rep *Representation, mode MergeMode, paths ...string) error {
 	if rep == nil {
 		rep = NewRepresentation()
@@ -174,47 +165,47 @@ func loadFromFile(fs fs.FS, rep *Representation, path string, mode MergeMode) er
 }
 
 // runLoader executes a preloader, applying MergeMode semantics and
-// global de‑duplication (word, pron) across all sources.
+// global de‑duplication (expression, phones) across all sources.
 func runLoader(pl Loader, mode MergeMode, r io.Reader, rep *Representation) error {
 	if pl == nil {
 		return fmt.Errorf("nil preloader for ")
 	}
-	datasetWords := make(map[string]struct{})
+	datasetExpressions := make(map[string]struct{})
 	replaced := make(map[string]struct{}) // used only in MergeModeReplace
 
-	emit := func(word string, prons []string) error {
-		word = strings.TrimSpace(word)
-		if word == "" || len(prons) == 0 {
+	emit := func(expression string, phones []string) error {
+		expression = strings.TrimSpace(expression)
+		if expression == "" || len(phones) == 0 {
 			return nil
 		}
 
-		datasetWords[word] = struct{}{}
-		baseKey := word + "\x00"
+		datasetExpressions[expression] = struct{}{}
+		baseKey := expression + "\x00"
 
-		// In MergeModeNoOverride, words that already exist in the
-		// preloaded dictionary are left untouched: ignore new prons.
+		// In MergeModeNoOverride, expressions that already exist in the
+		// preloaded dictionary are left untouched: ignore new phones.
 		if mode == MergeModeNoOverride {
-			if _, pre := rep.PreloadedWords[word]; pre {
+			if _, pre := rep.PreloadedWords[expression]; pre {
 				return nil
 			}
 		}
 
-		// In MergeModeReplace, the first time we see a word that comes
-		// from the existing preloaded dictionary, discard its current
-		// pronunciations and start fresh.
+		// In MergeModeReplace, the first time we see an expression that
+		// comes from the existing preloaded dictionary, discard its
+		// current pronunciations and start fresh.
 		if mode == MergeModeReplace {
-			if _, pre := rep.PreloadedWords[word]; pre {
-				if _, already := replaced[word]; !already {
-					for _, old := range rep.Entries[word] {
+			if _, pre := rep.PreloadedWords[expression]; pre {
+				if _, already := replaced[expression]; !already {
+					for _, old := range rep.Entries[expression] {
 						delete(rep.SeenWordPron, baseKey+old)
 					}
-					rep.Entries[word] = nil
-					replaced[word] = struct{}{}
+					rep.Entries[expression] = nil
+					replaced[expression] = struct{}{}
 				}
 			}
 		}
 
-		for _, p := range prons {
+		for _, p := range phones {
 			p = strings.TrimSpace(p)
 			if p == "" {
 				continue
@@ -227,10 +218,10 @@ func runLoader(pl Loader, mode MergeMode, r io.Reader, rep *Representation) erro
 
 			switch mode {
 			case MergeModePrepend:
-				rep.Entries[word] = append([]string{p}, rep.Entries[word]...)
+				rep.Entries[expression] = append([]string{p}, rep.Entries[expression]...)
 			default:
 				// Append mode (including no-override & replace).
-				rep.Entries[word] = append(rep.Entries[word], p)
+				rep.Entries[expression] = append(rep.Entries[expression], p)
 			}
 		}
 
@@ -241,10 +232,10 @@ func runLoader(pl Loader, mode MergeMode, r io.Reader, rep *Representation) erro
 		return fmt.Errorf("preload (%s): %w", pl.Kind(), err)
 	}
 
-	// After consuming the full dataset, record words that originate
+	// After consuming the full dataset, record expressions that originate
 	// from this source as "preloaded" for future merges.
-	for w := range datasetWords {
-		rep.PreloadedWords[w] = struct{}{}
+	for expr := range datasetExpressions {
+		rep.PreloadedWords[expr] = struct{}{}
 	}
 
 	return nil

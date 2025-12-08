@@ -1,7 +1,7 @@
 // Package phonodict provides helpers to preload, merge and represent
 // pronunciation dictionaries. It supports multiple input formats via
 // pluggable "Loader" implementations and exposes a functional API
-// for line-based textual loaders
+// for line-based textual loaders.
 package phono
 
 import (
@@ -9,11 +9,8 @@ import (
 	"unicode/utf8"
 )
 
-// Expression is a sequence of grapheme encode as an UTF8 string.
+// Expression is a sequence of graphemes encoded as a UTF‑8 string.
 type Expression = string
-
-// IPA is an international phonetic alphabet composed string.
-type IPA = string
 
 type Phonetized = string
 
@@ -22,7 +19,7 @@ type AnnotatedPhonetized struct {
 	C float64    `json:"c"`
 }
 
-type Dictionary map[Expression][]IPA
+type Dictionary map[Expression][]Phonetized
 
 // Representation holds the internal dictionary representation used
 // by the scanner and the loaders.
