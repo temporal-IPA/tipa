@@ -58,7 +58,7 @@ func sniffSlashedTxt(sniff []byte, isEOF bool) bool {
 //
 //	<expression> <space-or-tab> /phon/            # single form
 //	<expression> <space-or-tab> /phon1/;/phon2/   # separated by ';'
-//	<expression> <space-or-tab> /phon1/ , /phon2  # separated by ','
+//	<expression> <space-or-tab> /phon1/ , /phon2/  # separated by ','
 //
 // Everything between two phonetic segments is ignored. For example,
 // "/p1/;/p2/" and "/p1/ , /p2" both yield the two forms "p1", "p2".
