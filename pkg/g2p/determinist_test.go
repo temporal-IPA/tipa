@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/benoit-pereira-da-silva/textual/pkg/textual"
 	"github.com/temporal-IPA/tipa/pkg/phono"
 )
 
@@ -19,14 +20,14 @@ import (
 // for simple tests; it is **not** a general renderer for all pipelines,
 // but it is sufficient to validate AllowPartialMatch behaviour and
 // basic scan properties.
-func renderPhoneticOrRaw(res Result) string {
+func renderPhoneticOrRaw(res textual.Result) string {
 	runes := []rune(res.Text)
 	if len(runes) == 0 {
 		return ""
 	}
 
 	type span struct {
-		s string
+		s textual.UTF8String
 		l int
 	}
 
@@ -37,7 +38,7 @@ func renderPhoneticOrRaw(res Result) string {
 			continue
 		}
 		posToSpan[f.Pos] = span{
-			s: f.Phonetized,
+			s: f.Transformed,
 			l: f.Len,
 		}
 	}
@@ -45,7 +46,7 @@ func renderPhoneticOrRaw(res Result) string {
 	var b strings.Builder
 	for pos := 0; pos < len(runes); pos++ {
 		if sp, ok := posToSpan[pos]; ok {
-			b.WriteString(sp.s)
+			b.WriteString(string(sp.s))
 			// Skip underlying runes covered by this fragment.
 			if sp.l > 0 {
 				pos += sp.l - 1
@@ -79,20 +80,20 @@ func TestScanProgressiveThroughUnknownChunkWithPartialMatch(t *testing.T) {
 
 	// Fragments should cover "Le" and "Benoit" in order.
 	frag0 := res.Fragments[0]
-	if frag0.Phonetized != "lə" || frag0.Pos != 0 || frag0.Len != 2 {
+	if frag0.Transformed != "lə" || frag0.Pos != 0 || frag0.Len != 2 {
 		t.Errorf("unexpected first fragment: %+v", frag0)
 	}
 
 	frag1 := res.Fragments[1]
-	if frag1.Phonetized != "bənwa" || frag1.Pos != 7 || frag1.Len != 6 {
+	if frag1.Transformed != "bənwa" || frag1.Pos != 7 || frag1.Len != 6 {
 		t.Errorf("unexpected second fragment: %+v", frag1)
 	}
-
-	if got, want := len(res.RawTexts), 1; got != want {
+	rawTexts := res.RawTexts()
+	if got, want := len(rawTexts), 1; got != want {
 		t.Fatalf("expected %d raw text span, got %d", want, got)
 	}
 
-	raw := res.RawTexts[0]
+	raw := rawTexts[0]
 	// The raw block contains the space before "Gros" and the unknown word itself.
 	if raw.Text != " Gros" || raw.Pos != 2 || raw.Len != 5 {
 		t.Errorf("unexpected raw text: %+v", raw)
@@ -125,15 +126,16 @@ func TestScanProgressiveThroughUnknownChunkWithoutPartialMatch(t *testing.T) {
 	}
 
 	frag0 := res.Fragments[0]
-	if frag0.Phonetized != "lə" || frag0.Pos != 0 || frag0.Len != 2 {
+	if frag0.Transformed != "lə" || frag0.Pos != 0 || frag0.Len != 2 {
 		t.Errorf("unexpected fragment with AllowPartialMatch=false: %+v", frag0)
 	}
 
-	if got, want := len(res.RawTexts), 1; got != want {
-		t.Fatalf("expected %d raw text span, got %d (raw=%+v)", want, got, res.RawTexts)
+	rawTexts := res.RawTexts()
+	if got, want := len(rawTexts), 1; got != want {
+		t.Fatalf("expected %d raw text span, got %d (raw=%+v)", want, got, rawTexts)
 	}
 
-	raw := res.RawTexts[0]
+	raw := rawTexts[0]
 	// With partial matching disabled, "GrosBenoit" remains entirely raw.
 	if raw.Text != " GrosBenoit" || raw.Pos != 2 || raw.Len != len([]rune(" GrosBenoit")) {
 		t.Errorf("unexpected raw text with AllowPartialMatch=false: %+v", raw)
@@ -168,7 +170,8 @@ func TestScanTolerantDiacritics(t *testing.T) {
 	if len(strict.Fragments) != 0 {
 		t.Fatalf("expected no fragments in strict mode, got %d", len(strict.Fragments))
 	}
-	if got, want := len(strict.RawTexts), 1; got != want {
+	rawTexts := strict.RawTexts()
+	if got, want := len(rawTexts), 1; got != want {
 		t.Fatalf("expected %d raw text span in strict mode, got %d", want, got)
 	}
 
@@ -180,16 +183,17 @@ func TestScanTolerantDiacritics(t *testing.T) {
 
 	// Tolerant mode should match and produce a single fragment.
 	tolerant := d.ScanWithOptions("garcon", opts)
+	rawTexts = tolerant.RawTexts()
 	if got, want := len(tolerant.Fragments), 1; got != want {
 		t.Fatalf("expected %d fragment in tolerant mode, got %d", want, got)
 	}
 
 	frag := tolerant.Fragments[0]
-	if frag.Phonetized != "garsɔ̃" || frag.Pos != 0 || frag.Len != 6 {
+	if frag.Transformed != "garsɔ̃" || frag.Pos != 0 || frag.Len != 6 {
 		t.Errorf("unexpected tolerant fragment: %+v", frag)
 	}
-	if len(tolerant.RawTexts) != 0 {
-		t.Errorf("expected no raw text in tolerant mode, got: %+v", tolerant.RawTexts)
+	if len(rawTexts) != 0 {
+		t.Errorf("expected no raw text in tolerant mode, got: %+v", rawTexts)
 	}
 }
 
@@ -240,14 +244,15 @@ func TestAllowPartialMatchControlsSingleGrapheme(t *testing.T) {
 		t.Fatalf("with AllowPartialMatch=false: expected %d fragment, got %d (fragments=%#v)", want, got, res.Fragments)
 	}
 
+	rawTexts := res.RawTexts()
 	frag := res.Fragments[0]
-	if frag.Phonetized != "A" || frag.Pos != 4 || frag.Len != 1 {
+	if frag.Transformed != "A" || frag.Pos != 4 || frag.Len != 1 {
 		t.Errorf("unexpected fragment with AllowPartialMatch=false: %+v", frag)
 	}
 
 	// "bar " should now remain entirely raw at the beginning.
-	if len(res.RawTexts) == 0 || res.RawTexts[0].Text != "bar " {
-		t.Errorf("expected leading raw text 'bar ', got: %+v", res.RawTexts)
+	if len(rawTexts) == 0 || rawTexts[0].Text != "bar " {
+		t.Errorf("expected leading raw text 'bar ', got: %+v", rawTexts)
 	}
 }
 
@@ -267,16 +272,16 @@ func TestAllowPartialMatchIsolatedWord(t *testing.T) {
 	}
 
 	res := d.ScanWithOptions("a", opts)
-
+	rawTexts := res.RawTexts()
 	if got, want := len(res.Fragments), 1; got != want {
 		t.Fatalf("expected %d fragment, got %d", want, got)
 	}
-	if len(res.RawTexts) != 0 {
-		t.Fatalf("expected no raw text, got %+v", res.RawTexts)
+	if len(rawTexts) != 0 {
+		t.Fatalf("expected no raw text, got %+v", rawTexts)
 	}
 
 	frag := res.Fragments[0]
-	if frag.Phonetized != "A" || frag.Pos != 0 || frag.Len != 1 {
+	if frag.Transformed != "A" || frag.Pos != 0 || frag.Len != 1 {
 		t.Errorf("unexpected fragment: %+v", frag)
 	}
 }
@@ -305,15 +310,15 @@ func TestAllowPartialMatchFullToken(t *testing.T) {
 		DiacriticInsensitive: false,
 		AllowPartialMatch:    false,
 	}
-	resStrict := d.ScanWithOptions(text, optsStrict)
-
+	resStrict := d.ScanWithOptions(textual.UTF8String(text), optsStrict)
+	rawTexts := resStrict.RawTexts()
 	if got, want := len(resStrict.Fragments), 0; got != want {
 		t.Fatalf("AllowPartialMatch=false: expected %d fragments, got %d (%+v)", want, got, resStrict.Fragments)
 	}
-	if got, want := len(resStrict.RawTexts), 1; got != want {
-		t.Fatalf("AllowPartialMatch=false: expected %d raw span, got %d (%+v)", want, got, resStrict.RawTexts)
+	if got, want := len(rawTexts), 1; got != want {
+		t.Fatalf("AllowPartialMatch=false: expected %d raw span, got %d (%+v)", want, got, rawTexts)
 	}
-	raw := resStrict.RawTexts[0]
+	raw := rawTexts[0]
 	if raw.Text != "abcdE" || raw.Pos != 0 || raw.Len != len([]rune(text)) {
 		t.Errorf("AllowPartialMatch=false: unexpected raw span: %+v", raw)
 	}
@@ -328,8 +333,8 @@ func TestAllowPartialMatchFullToken(t *testing.T) {
 		DiacriticInsensitive: false,
 		AllowPartialMatch:    true,
 	}
-	resDecompose := d.ScanWithOptions(text, optsDecompose)
-
+	resDecompose := d.ScanWithOptions(textual.UTF8String(text), optsDecompose)
+	rawTexts = resDecompose.RawTexts()
 	if got, want := len(resDecompose.Fragments), 4; got != want {
 		t.Fatalf("AllowPartialMatch=true: expected %d fragments, got %d (%+v)", want, got, resDecompose.Fragments)
 	}
@@ -338,15 +343,15 @@ func TestAllowPartialMatchFullToken(t *testing.T) {
 	wantIPA := []string{"1", "2", "3", "4"}
 	for i, w := range wantIPA {
 		f := resDecompose.Fragments[i]
-		if f.Phonetized != w || f.Pos != i || f.Len != 1 {
+		if string(f.Transformed) != w || f.Pos != i || f.Len != 1 {
 			t.Errorf("AllowPartialMatch=true: unexpected fragment[%d]: %+v (want Phonetized=%q, Pos=%d, Len=1)", i, f, w, i)
 		}
 	}
-
-	if got, want := len(resDecompose.RawTexts), 1; got != want {
-		t.Fatalf("AllowPartialMatch=true: expected %d raw span, got %d (%+v)", want, got, resDecompose.RawTexts)
+	rawTexts = resDecompose.RawTexts()
+	if got, want := len(rawTexts), 1; got != want {
+		t.Fatalf("AllowPartialMatch=true: expected %d raw span, got %d (%+v)", want, got, rawTexts)
 	}
-	raw = resDecompose.RawTexts[0]
+	raw = rawTexts[0]
 	if raw.Text != "E" || raw.Pos != 4 || raw.Len != 1 {
 		t.Errorf("AllowPartialMatch=true: unexpected raw span: %+v (want Text=%q, Pos=%d, Len=%d)", raw, "E", 4, 1)
 	}
@@ -371,22 +376,23 @@ func TestDeterministDoesNotDecomposeUnknownSingleWord(t *testing.T) {
 	d := NewDeterminist(langDict)
 	text := "Fontenay"
 
-	res := d.ScanWithOptions(text, DeterministOptions{
+	res := d.ScanWithOptions(textual.UTF8String(text), DeterministOptions{
 		DiacriticInsensitive: false,
 		AllowPartialMatch:    false,
 	})
 
+	rawTexts := res.RawTexts()
 	// Desired behaviour: no internal breakdown of "Fontenay" into "Font" + "ena".
 	if got, want := len(res.Fragments), 0; got != want {
 		t.Fatalf("expected %d fragments for %q, got %d (%+v)", want, text, got, res.Fragments)
 	}
 
-	if got, want := len(res.RawTexts), 1; got != want {
-		t.Fatalf("expected %d raw span for %q, got %d (%+v)", want, text, got, res.RawTexts)
+	if got, want := len(rawTexts), 1; got != want {
+		t.Fatalf("expected %d raw span for %q, got %d (%+v)", want, text, got, rawTexts)
 	}
 
-	raw := res.RawTexts[0]
-	if raw.Text != text || raw.Pos != 0 || raw.Len != len([]rune(text)) {
+	raw := rawTexts[0]
+	if string(raw.Text) != text || raw.Pos != 0 || raw.Len != len([]rune(text)) {
 		t.Errorf("unexpected raw span for %q: %+v (want Text=%q, Pos=0, Len=%d)", text, raw, text, len([]rune(text)))
 	}
 }
@@ -403,29 +409,29 @@ func TestDeterministCanDecomposeUnknownSingleWordWhenAllowed(t *testing.T) {
 	d := NewDeterminist(langDict)
 	text := "Fontenay"
 
-	res := d.ScanWithOptions(text, DeterministOptions{
+	res := d.ScanWithOptions(textual.UTF8String(text), DeterministOptions{
 		DiacriticInsensitive: false,
 		AllowPartialMatch:    true,
 	})
-
+	rawTexts := res.RawTexts()
 	if got, want := len(res.Fragments), 2; got != want {
 		t.Fatalf("expected %d fragments for %q, got %d (%+v)", want, text, got, res.Fragments)
 	}
 
 	frag0 := res.Fragments[0]
-	if frag0.Phonetized != "F" || frag0.Pos != 0 || frag0.Len != 4 {
+	if frag0.Transformed != "F" || frag0.Pos != 0 || frag0.Len != 4 {
 		t.Errorf("unexpected first fragment for %q: %+v (want Phonetized=F, Pos=0, Len=4)", text, frag0)
 	}
 
 	frag1 := res.Fragments[1]
-	if frag1.Phonetized != "E" || frag1.Pos != 4 || frag1.Len != 3 {
+	if frag1.Transformed != "E" || frag1.Pos != 4 || frag1.Len != 3 {
 		t.Errorf("unexpected second fragment for %q: %+v (want Phonetized=E, Pos=4, Len=3)", text, frag1)
 	}
 
-	if got, want := len(res.RawTexts), 1; got != want {
-		t.Fatalf("expected %d raw span for %q, got %d (%+v)", want, text, got, res.RawTexts)
+	if got, want := len(rawTexts), 1; got != want {
+		t.Fatalf("expected %d raw span for %q, got %d (%+v)", want, text, got, rawTexts)
 	}
-	raw := res.RawTexts[0]
+	raw := rawTexts[0]
 	if raw.Text != "y" || raw.Pos != 7 || raw.Len != 1 {
 		t.Errorf("unexpected raw span for %q: %+v (want Text=%q, Pos=7, Len=1)", text, raw, "y")
 	}
@@ -446,24 +452,24 @@ func TestDeterministStillSupportsMultilingualSequences(t *testing.T) {
 	text := "東京大学"
 
 	// Use the default options (AllowPartialMatch=true).
-	res := d.Scan(text)
-
+	res := d.Scan(textual.UTF8String(text))
+	rawTexts := res.RawTexts()
 	if got, want := len(res.Fragments), 2; got != want {
 		t.Fatalf("expected %d fragments for %q, got %d (%+v)", want, text, got, res.Fragments)
 	}
 
 	frag0 := res.Fragments[0]
-	if frag0.Phonetized != "T1" || frag0.Pos != 0 || frag0.Len != 2 {
+	if frag0.Transformed != "T1" || frag0.Pos != 0 || frag0.Len != 2 {
 		t.Errorf("unexpected first fragment for %q: %+v (want Phonetized=T1, Pos=0, Len=2)", text, frag0)
 	}
 
 	frag1 := res.Fragments[1]
-	if frag1.Phonetized != "T2" || frag1.Pos != 2 || frag1.Len != 2 {
+	if frag1.Transformed != "T2" || frag1.Pos != 2 || frag1.Len != 2 {
 		t.Errorf("unexpected second fragment for %q: %+v (want Phonetized=T2, Pos=2, Len=2)", text, frag1)
 	}
 
-	if len(res.RawTexts) != 0 {
-		t.Errorf("expected no raw text for %q, got %+v", text, res.RawTexts)
+	if len(rawTexts) != 0 {
+		t.Errorf("expected no raw text for %q, got %+v", text, rawTexts)
 	}
 }
 
@@ -482,7 +488,7 @@ func TestDeterministCustomDelimiters(t *testing.T) {
 	// Default delimiters: comma acts as a delimiter (punctuation), so
 	// both "foo" and "bar" can be matched as separate expressions when
 	// AllowPartialMatch=false.
-	resDefault := d.ScanWithOptions(text, DeterministOptions{
+	resDefault := d.ScanWithOptions(textual.UTF8String(text), DeterministOptions{
 		DiacriticInsensitive: false,
 		AllowPartialMatch:    false,
 	})
@@ -492,11 +498,11 @@ func TestDeterministCustomDelimiters(t *testing.T) {
 	}
 
 	frag0 := resDefault.Fragments[0]
-	if frag0.Phonetized != "F" || frag0.Pos != 0 || frag0.Len != 3 {
+	if frag0.Transformed != "F" || frag0.Pos != 0 || frag0.Len != 3 {
 		t.Errorf("default delimiters: unexpected first fragment: %+v", frag0)
 	}
 	frag1 := resDefault.Fragments[1]
-	if frag1.Phonetized != "B" || frag1.Pos != 4 || frag1.Len != 3 {
+	if frag1.Transformed != "B" || frag1.Pos != 4 || frag1.Len != 3 {
 		t.Errorf("default delimiters: unexpected second fragment: %+v", frag1)
 	}
 
@@ -505,19 +511,20 @@ func TestDeterministCustomDelimiters(t *testing.T) {
 	// AllowPartialMatch=false there should be no match.
 	d.SetDelimiters([]rune{' '})
 
-	resCustom := d.ScanWithOptions(text, DeterministOptions{
+	resCustom := d.ScanWithOptions(textual.UTF8String(text), DeterministOptions{
 		DiacriticInsensitive: false,
 		AllowPartialMatch:    false,
 	})
+	rawTexts := resCustom.RawTexts()
 
 	if got, want := len(resCustom.Fragments), 0; got != want {
 		t.Fatalf("custom delimiters: expected %d fragments, got %d (%+v)", want, got, resCustom.Fragments)
 	}
-	if got, want := len(resCustom.RawTexts), 1; got != want {
-		t.Fatalf("custom delimiters: expected %d raw span, got %d (%+v)", want, got, resCustom.RawTexts)
+	if got, want := len(rawTexts), 1; got != want {
+		t.Fatalf("custom delimiters: expected %d raw span, got %d (%+v)", want, got, rawTexts)
 	}
-	raw := resCustom.RawTexts[0]
-	if raw.Text != text || raw.Pos != 0 || raw.Len != len([]rune(text)) {
+	raw := rawTexts[0]
+	if string(raw.Text) != text || raw.Pos != 0 || raw.Len != len([]rune(text)) {
 		t.Errorf("custom delimiters: unexpected raw span: %+v", raw)
 	}
 }
@@ -544,7 +551,7 @@ func TestDeterministApplyChain(t *testing.T) {
 	text := "foo bar baz"
 
 	// First pass: only "foo" is recognized.
-	res1 := d1.Scan(text)
+	res1 := d1.Scan(textual.UTF8String(text))
 	if got, want := len(res1.Fragments), 1; got != want {
 		t.Fatalf("after pass1: expected %d fragment, got %d (%+v)", want, got, res1.Fragments)
 	}
@@ -564,7 +571,7 @@ func TestDeterministApplyChain(t *testing.T) {
 	wantLen := []int{3, 3, 3}
 
 	for i, f := range res3.Fragments {
-		if f.Phonetized != wantIPA[i] || f.Pos != wantPos[i] || f.Len != wantLen[i] {
+		if string(f.Transformed) != wantIPA[i] || f.Pos != wantPos[i] || f.Len != wantLen[i] {
 			t.Errorf("unexpected fragment[%d]: %+v (want IPA=%q, Pos=%d, Len=%d)", i, f, wantIPA[i], wantPos[i], wantLen[i])
 		}
 	}
@@ -579,13 +586,8 @@ func TestDeterministStreamApply(t *testing.T) {
 	d := NewDeterminist(dict)
 
 	text := "foo"
-	base := Result{
-		Text: text,
-		RawTexts: []RawText{{
-			Text: text,
-			Pos:  0,
-			Len:  len([]rune(text)),
-		}},
+	base := textual.Result{
+		Text: textual.UTF8String(text),
 	}
 
 	want := d.Apply(base)
@@ -598,7 +600,7 @@ func TestDeterministStreamApply(t *testing.T) {
 		t.Fatalf("expected a result from StreamApply, got closed channel")
 	}
 
-	if len(got.Fragments) != len(want.Fragments) || len(got.RawTexts) != len(want.RawTexts) {
+	if len(got.Fragments) != len(want.Fragments) || len(got.RawTexts()) != len(want.RawTexts()) {
 		t.Fatalf("StreamApply result differs from Apply: got=%+v want=%+v", got, want)
 	}
 }

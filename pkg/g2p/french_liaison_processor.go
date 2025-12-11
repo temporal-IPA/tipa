@@ -5,34 +5,13 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/benoit-pereira-da-silva/textual/pkg/textual"
 )
 
 // FrenchLiaisonProcessor applies simple French liaison heuristics
-// on top of a grapheme‑to‑phoneme Result. It never modifies the
-// original text, only the Phonetized fields of the fragments.
-//
-// The implementation is intentionally conservative: it only inserts
-// liaison in a few well‑defined contexts (determiners, pronouns,
-// some adjectives, très/trop, and optionally “final consonant”
-// heuristics) and only when the right‑hand word begins with a
-// vowel or an h muet.
-//
-// As of this version, liaison consonants are realised primarily
-// as **onsets of the right‑hand word** (e.g. "des albatros" →
-// "de zalbatʁos"), which avoids unnatural sequences such as
-// "de z albatʁos" where the liaison consonant appears as an
-// isolated token. When we cannot safely attach to the right,
-// we fall back to appending the consonant to the left word.
+// on top of a grapheme‑to‑phoneme textual.Result.
 type FrenchLiaisonProcessor struct {
-	// allowLooseLiaison controls whether we are allowed to use the
-	// loose "final consonant" heuristic for arbitrary words, beyond
-	// the small hand‑coded lexical sets.
-	//
-	// When false (default via NewFrenchLiaisonProcessor), liaison is
-	// only created after a few determiners, pronouns, and adjectives.
-	// When true (via NewFrenchLiaisonProcessorWithFallback), liaison
-	// may also be added based purely on word‑final S/X/Z/N/T/D/P for
-	// non‑proper names.
 	allowLooseLiaison bool
 
 	determinersZ map[string]struct{}
@@ -41,41 +20,26 @@ type FrenchLiaisonProcessor struct {
 	pronounsZ    map[string]struct{}
 	pronounsN    map[string]struct{}
 	verbsT       map[string]struct{}
-	adverbsZ     map[string]struct{} // e.g. très
-	adverbsP     map[string]struct{} // e.g. trop
+	adverbsZ     map[string]struct{}
+	adverbsP     map[string]struct{}
 
-	forbidBefore map[string]struct{} // words that block liaison after them (e.g. "et")
-	hAspire      map[string]struct{} // words with h aspiré (no liaison before)
+	forbidBefore map[string]struct{}
+	hAspire      map[string]struct{}
 }
 
-// Ensure FrenchLiaisonProcessor implements the pipeline interfaces.
-var (
-	_ Processor            = (*FrenchLiaisonProcessor)(nil)
-	_ CancellableProcessor = (*FrenchLiaisonProcessor)(nil)
-)
-
-// NewFrenchLiaisonProcessor returns a processor configured with a
-// conservative rule set: liaison is only applied after a small list of
-// determiners, pronouns, and common adjectives.
 func NewFrenchLiaisonProcessor() *FrenchLiaisonProcessor {
 	return newFrenchLiaisonProcessor(false)
 }
 
-// NewFrenchLiaisonProcessorWithFallback returns a processor that also
-// allows optional liaison based only on final consonants (s/x/z/n/t/d/p)
-// for words that are not obvious proper names.
 func NewFrenchLiaisonProcessorWithFallback() *FrenchLiaisonProcessor {
 	return newFrenchLiaisonProcessor(true)
 }
 
-// newFrenchLiaisonProcessor initializes the lexical sets and global
-// control flags for liaison processing.
 func newFrenchLiaisonProcessor(allowLoose bool) *FrenchLiaisonProcessor {
 	p := &FrenchLiaisonProcessor{
 		allowLooseLiaison: allowLoose,
 	}
 
-	// Minimal liaison givers – not exhaustive, but useful in practice.
 	p.determinersZ = makeNormalizedSet([]string{
 		"les", "des", "mes", "tes", "ses",
 		"nos", "vos", "leurs",
@@ -97,18 +61,15 @@ func newFrenchLiaisonProcessor(allowLoose bool) *FrenchLiaisonProcessor {
 	p.verbsT = makeNormalizedSet([]string{
 		"est", "sont", "ait", "était", "étaient",
 	})
-	// Optional extras: très + ADJ (z), trop + ADJ (p).
 	p.adverbsZ = makeNormalizedSet([]string{
 		"très", "tres",
 	})
 	p.adverbsP = makeNormalizedSet([]string{
 		"trop",
 	})
-	// Words that never take liaison after them.
 	p.forbidBefore = makeNormalizedSet([]string{
 		"et",
 	})
-	// Small list of h aspiré words – enough to avoid the worst errors.
 	p.hAspire = makeNormalizedSet([]string{
 		"haricot", "honte", "héros", "heros", "huitre",
 	})
@@ -116,16 +77,14 @@ func newFrenchLiaisonProcessor(allowLoose bool) *FrenchLiaisonProcessor {
 	return p
 }
 
-// Apply implements Processor. It calls the internal helper apply once
-// and returns its result.
-func (p *FrenchLiaisonProcessor) Apply(res Result) Result {
+// Apply implements Processor. It calls the internal helper apply once.
+func (p *FrenchLiaisonProcessor) Apply(res textual.Result) textual.Result {
 	return p.apply(res)
 }
 
-// StreamApply implements CancellableProcessor. It emits a single
-// Result on the returned channel and observes ctx cancellation.
-func (p *FrenchLiaisonProcessor) StreamApply(ctx context.Context, input Result) <-chan Result {
-	out := make(chan Result, 1)
+// StreamApply implements CancellableProcessor. It emits a single Result.
+func (p *FrenchLiaisonProcessor) StreamApply(ctx context.Context, input textual.Result) <-chan textual.Result {
+	out := make(chan textual.Result, 1)
 
 	go func() {
 		defer close(out)
@@ -148,69 +107,45 @@ func (p *FrenchLiaisonProcessor) StreamApply(ctx context.Context, input Result) 
 	return out
 }
 
-// apply takes a g2p Result and returns a new Result in which liaison
-// consonants have been inserted into the Phonetized fields of fragments
-// when appropriate.
-//
-// The original text and fragment positions are preserved. Only the
-// Phonetized strings are modified.
-func (p *FrenchLiaisonProcessor) apply(res Result) Result {
+// apply takes a g2p Result and returns a new Result with liaison
+// consonants inserted into Fragment.Transformed when appropriate.
+func (p *FrenchLiaisonProcessor) apply(res textual.Result) textual.Result {
 	if len(res.Text) == 0 || len(res.Fragments) == 0 {
 		return res
 	}
 
-	// Copy fragments so that we do not mutate the original Result.
 	out := res
-	out.Fragments = make([]Fragment, len(res.Fragments))
+	out.Fragments = make([]textual.Fragment, len(res.Fragments))
 	copy(out.Fragments, res.Fragments)
 
-	runes := []rune(res.Text)
-	tokens := tokenizeFrenchWords(res.Text)
+	runes := []rune(string(res.Text))
+	tokens := tokenizeFrenchWords(string(res.Text))
 	if len(tokens) < 2 {
 		return out
 	}
 
-	// Attach fragments to tokens when a fragment span exactly covers the
-	// token span in rune positions. This keeps the logic robust even if
-	// some dictionary entries span multiple orthographic tokens.
 	attachFragmentsToTokens(tokens, out.Fragments)
 
-	// Walk through successive (word) tokens and decide whether to insert
-	// a liaison consonant between them.
 	for i := 0; i < len(tokens)-1; i++ {
 		left := &tokens[i]
 		right := &tokens[i+1]
 
-		// We only handle boundaries where both sides have a pronunciation.
 		if left.fragIndex < 0 || right.fragIndex < 0 {
 			continue
 		}
-
-		// Do not cross strong punctuation or line breaks.
 		if hasStrongBoundary(runes, left, right) {
 			continue
 		}
-
-		// Never create liaison after words like "et".
 		if _, forbidden := p.forbidBefore[left.norm]; forbidden {
 			continue
 		}
-
-		// The right word must start with a vowel or h muet.
-		if !p.startsWithVowelOrHMuet(right.text) {
+		if !p.startsWithVowelOrHMuet(left.text, right.text) {
 			continue
 		}
-
-		// Decide which liaison consonant to use, if any.
 		liaisonPhone := p.liaisonPhoneFor(left)
 		if liaisonPhone == "" {
 			continue
 		}
-
-		// Insert the liaison consonant across the left/right fragments.
-		// We prefer to realise it as an onset on the right fragment
-		// (e.g. "des albatros" → "de zalbatʁos") rather than as a
-		// standalone "z" token between the two words.
 		p.insertLiaisonConsonant(
 			&out.Fragments[left.fragIndex],
 			&out.Fragments[right.fragIndex],
@@ -221,11 +156,8 @@ func (p *FrenchLiaisonProcessor) apply(res Result) Result {
 	return out
 }
 
-// --- The rest of the file (tokens, helpers, etc.) stays identical ---
+// --- tokens and helpers ---
 
-// orthToken represents a single orthographic word (sequence of letters
-// and possibly apostrophes) in the original text, along with its rune
-// offsets and the index of the fragment that covers it, if any.
 type orthToken struct {
 	text      string
 	norm      string
@@ -234,12 +166,6 @@ type orthToken struct {
 	fragIndex int
 }
 
-// tokenizeFrenchWords extracts a flat list of word‑like tokens from
-// the text. Tokens are sequences of letters and apostrophes; everything
-// else (spaces, punctuation, hyphens, etc.) acts as a separator.
-//
-// Token positions are recorded in rune indices so they can be aligned
-// with Fragment.Pos / Fragment.Len from the g2p pipeline.
 func tokenizeFrenchWords(text string) []orthToken {
 	runes := []rune(text)
 	n := len(runes)
@@ -265,11 +191,9 @@ func tokenizeFrenchWords(text string) []orthToken {
 	if inWord {
 		tokens = append(tokens, newOrthToken(runes, wordStart, n))
 	}
-
 	return tokens
 }
 
-// newOrthToken builds an orthToken from a rune slice [start:end].
 func newOrthToken(runes []rune, start, end int) orthToken {
 	txt := string(runes[start:end])
 	return orthToken{
@@ -281,9 +205,6 @@ func newOrthToken(runes []rune, start, end int) orthToken {
 	}
 }
 
-// isWordRune reports whether a rune belongs to a "word" token for the
-// purposes of liaison. Letters and apostrophes are treated as word
-// characters; hyphens and other punctuation are separators.
 func isWordRune(r rune) bool {
 	if unicode.IsLetter(r) {
 		return true
@@ -296,10 +217,7 @@ func isWordRune(r rune) bool {
 	}
 }
 
-// attachFragmentsToTokens links orthTokens to fragments when a fragment
-// span exactly matches the token span in rune offsets. Tokens that are
-// covered by multi‑word dictionary entries will not get a fragment.
-func attachFragmentsToTokens(tokens []orthToken, fragments []Fragment) {
+func attachFragmentsToTokens(tokens []orthToken, fragments []textual.Fragment) {
 	if len(tokens) == 0 || len(fragments) == 0 {
 		return
 	}
@@ -308,7 +226,6 @@ func attachFragmentsToTokens(tokens []orthToken, fragments []Fragment) {
 	for i := range tokens {
 		tok := &tokens[i]
 
-		// Skip fragments that end before the token starts.
 		for iFrag < len(fragments) && fragments[iFrag].Pos+fragments[iFrag].Len <= tok.runeStart {
 			iFrag++
 		}
@@ -323,9 +240,6 @@ func attachFragmentsToTokens(tokens []orthToken, fragments []Fragment) {
 	}
 }
 
-// hasStrongBoundary reports whether the text between left and right
-// tokens contains strong punctuation (. ? ! ; :) or line breaks. If so,
-// we do not create liaison across that boundary.
 func hasStrongBoundary(runes []rune, left, right *orthToken) bool {
 	start := left.runeStart + left.runeLen
 	end := right.runeStart
@@ -341,19 +255,15 @@ func hasStrongBoundary(runes []rune, left, right *orthToken) bool {
 			return true
 		}
 	}
-
 	return false
 }
 
-// startsWithVowelOrHMuet checks whether a word starts with a vowel
-// (orthographically a/e/i/o/u/y/œ with or without accents) or with a
-// non‑aspirated h (h muet).
-func (p *FrenchLiaisonProcessor) startsWithVowelOrHMuet(word string) bool {
-	norm := tolerantNormalize(word)
+// startsWithVowelOrHMuet: right word must start with vowel or non‑aspirated h.
+func (p *FrenchLiaisonProcessor) startsWithVowelOrHMuet(left, right string) bool {
+	norm := tolerantNormalize(right)
 	if norm == "" {
 		return false
 	}
-
 	for _, r := range norm {
 		if !unicode.IsLetter(r) {
 			continue
@@ -364,7 +274,6 @@ func (p *FrenchLiaisonProcessor) startsWithVowelOrHMuet(word string) bool {
 			}
 			return true
 		}
-
 		switch r {
 		case 'a', 'e', 'i', 'o', 'u', 'y', 'œ':
 			return true
@@ -372,32 +281,22 @@ func (p *FrenchLiaisonProcessor) startsWithVowelOrHMuet(word string) bool {
 			return false
 		}
 	}
-
 	return false
 }
 
-// liaisonPhoneFor decides which liaison consonant to insert after a
-// given left‑hand token, if any. It applies the lexical rule sets
-// first, and optionally falls back to the final‑consonant heuristic.
 func (p *FrenchLiaisonProcessor) liaisonPhoneFor(tok *orthToken) string {
 	if _, forbidden := p.forbidBefore[tok.norm]; forbidden {
 		return ""
 	}
-
 	if p.isLiaisonGiver(tok.norm) {
 		return p.guessLiaisonPhone(tok.text)
 	}
-
 	if p.allowLooseLiaison && !isProbablyProperName(tok.text) {
 		return p.guessLiaisonPhone(tok.text)
 	}
-
 	return ""
 }
 
-// isLiaisonGiver reports whether a normalized word belongs to one of
-// the small hand‑coded sets that systematically trigger liaison in
-// common contexts (determiners, pronouns, some adjectives, très/trop).
 func (p *FrenchLiaisonProcessor) isLiaisonGiver(norm string) bool {
 	if _, ok := p.determinersZ[norm]; ok {
 		return true
@@ -426,17 +325,9 @@ func (p *FrenchLiaisonProcessor) isLiaisonGiver(norm string) bool {
 	return false
 }
 
-// guessLiaisonPhone chooses the liaison consonant for a given word.
-// It first checks the small lexical classes (Z/N/T/P), then optionally
-// falls back to a simple orthographic heuristic based on the final
-// consonant.
-//
-// The returned value is a phonetic symbol string (e.g. "z", "n", "t"),
-// which can be IPA, SAMPA, or any compatible unit.
 func (p *FrenchLiaisonProcessor) guessLiaisonPhone(word string) string {
 	lower := tolerantNormalize(word)
 
-	// Lexical classes first.
 	if _, ok := p.determinersZ[lower]; ok {
 		return "z"
 	}
@@ -465,7 +356,6 @@ func (p *FrenchLiaisonProcessor) guessLiaisonPhone(word string) string {
 		return "p"
 	}
 
-	// Fallback purely by orthography: last letter of the word.
 	last := lastLetter(lower)
 	switch last {
 	case 's', 'x', 'z':
@@ -481,9 +371,6 @@ func (p *FrenchLiaisonProcessor) guessLiaisonPhone(word string) string {
 	}
 }
 
-// lastLetter returns the last letter rune of s, skipping any trailing
-// non‑letters (punctuation, digits, etc.). If no letter is found, it
-// returns 0.
 func lastLetter(s string) rune {
 	for len(s) > 0 {
 		r, size := utf8.DecodeLastRuneInString(s)
@@ -495,48 +382,22 @@ func lastLetter(s string) rune {
 	return 0
 }
 
-// insertLiaisonConsonant realises the liaison consonant between
-// two adjacent fragments.
-//
-// Preferred behaviour:
-//   - realise the consonant as an **onset** on the right fragment,
-//     so "des albatros" → left: "de", right: "zalbatʁos"
-//     and "vastes oiseaux" → "vast zwazo".
-//
-// This avoids intermediate "z" tokens ("de z albatʁos") that are
-// awkward both visually and for downstream syllabification.
-//
-// Fallback behaviour:
-//   - if the right fragment has no usable pronunciation, append the
-//     liaison consonant to the left fragment as before.
-func (p *FrenchLiaisonProcessor) insertLiaisonConsonant(leftFrag, rightFrag *Fragment, phone string) {
+func (p *FrenchLiaisonProcessor) insertLiaisonConsonant(leftFrag, rightFrag *textual.Fragment, phone string) {
 	phone = strings.TrimSpace(phone)
 	if phone == "" || leftFrag == nil {
 		return
 	}
 
-	// Preferred: attach to the right fragment if it has a non‑empty
-	// pronunciation. We strip outer whitespace but keep everything else
-	// (stress marks, dots, etc.) intact.
 	if rightFrag != nil {
-		base := strings.TrimSpace(string(rightFrag.Phonetized))
+		base := strings.TrimSpace(string(rightFrag.Transformed))
 		if base != "" {
-			rightFrag.Phonetized = phone + base
+			rightFrag.Transformed = textual.UTF8String(phone + base)
 			return
 		}
 	}
-
-	// Fallback: no usable right‑hand pronunciation, keep the old
-	// behaviour and append the liaison to the left fragment.
-	leftFrag.Phonetized = appendLiaisonPhone(string(leftFrag.Phonetized), phone)
+	leftFrag.Transformed = textual.UTF8String(appendLiaisonPhone(string(leftFrag.Transformed), phone))
 }
 
-// appendLiaisonPhone appends a liaison consonant to an existing
-// phonetized string, inserting a single space if both parts are
-// non‑empty.
-//
-// This helper is now mainly used as a **fallback** when we cannot
-// safely attach the liaison consonant to the right‑hand fragment.
 func appendLiaisonPhone(base, phone string) string {
 	base = strings.TrimSpace(base)
 	phone = strings.TrimSpace(phone)
@@ -550,8 +411,6 @@ func appendLiaisonPhone(base, phone string) string {
 	return base + " " + phone
 }
 
-// makeNormalizedSet builds a map‑set of tolerant‑normalized forms for
-// a small word list (used for lexical classes like determiners).
 func makeNormalizedSet(words []string) map[string]struct{} {
 	m := make(map[string]struct{}, len(words))
 	for _, w := range words {
@@ -564,9 +423,6 @@ func makeNormalizedSet(words []string) map[string]struct{} {
 	return m
 }
 
-// isProbablyProperName returns true if the word looks like a proper
-// name (first letter encountered is uppercase). This is only used to
-// avoid very dubious optional liaisons such as "Robert arrive".
 func isProbablyProperName(word string) bool {
 	for _, r := range word {
 		if !unicode.IsLetter(r) {
