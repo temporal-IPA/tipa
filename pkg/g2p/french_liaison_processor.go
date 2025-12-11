@@ -9,9 +9,15 @@ import (
 	"github.com/benoit-pereira-da-silva/textual/pkg/textual"
 )
 
-// FrenchLiaisonProcessor applies simple French liaison heuristics
-// on top of a grapheme‑to‑phoneme textual.Result.
-type FrenchLiaisonProcessor struct {
+// FrenchLiaison applies simple French liaison heuristics on top of a
+// grapheme‑to‑phoneme textual.Result.
+//
+// It implements textual.Processor so that it can be used directly in
+// textual.Chain, Router, IOReaderProcessor, Transformation, etc.
+type FrenchLiaison struct {
+	// allowLooseLiaison enables the optional heuristic that tries to
+	// guess liaison consonants for a broader set of words, beyond the
+	// curated determiner/pronoun/verb/adverb sets.
 	allowLooseLiaison bool
 
 	determinersZ map[string]struct{}
@@ -27,16 +33,25 @@ type FrenchLiaisonProcessor struct {
 	hAspire      map[string]struct{}
 }
 
-func NewFrenchLiaisonProcessor() *FrenchLiaisonProcessor {
-	return newFrenchLiaisonProcessor(false)
+// NewFrenchLiaison constructs a conservative FrenchLiaison processor
+// that only inserts liaison consonants for a curated set of grammatical
+// contexts (determiners, pronouns, verbs, etc.).
+func NewFrenchLiaison() *FrenchLiaison {
+	return newFrenchLiaison(false)
 }
 
-func NewFrenchLiaisonProcessorWithFallback() *FrenchLiaisonProcessor {
-	return newFrenchLiaisonProcessor(true)
+// NewFrenchLiaisonWithFallback constructs a FrenchLiaison processor that
+// also enables a loose heuristic to guess liaison consonants in a wider
+// range of contexts when they are not explicitly listed.
+func NewFrenchLiaisonWithFallback() *FrenchLiaison {
+	return newFrenchLiaison(true)
 }
 
-func newFrenchLiaisonProcessor(allowLoose bool) *FrenchLiaisonProcessor {
-	p := &FrenchLiaisonProcessor{
+// newFrenchLiaison initialises the internal lexicons used by the liaison
+// heuristics. The allowLoose flag controls whether the broader heuristic
+// is enabled.
+func newFrenchLiaison(allowLoose bool) *FrenchLiaison {
+	p := &FrenchLiaison{
 		allowLooseLiaison: allowLoose,
 	}
 
@@ -77,39 +92,63 @@ func newFrenchLiaisonProcessor(allowLoose bool) *FrenchLiaisonProcessor {
 	return p
 }
 
-// Apply implements Processor. It calls the internal helper apply once.
-func (p *FrenchLiaisonProcessor) Apply(res textual.Result) textual.Result {
-	return p.apply(res)
-}
+// Apply implements the textual.Processor interface.
+//
+// For each incoming Result, FrenchLiaison analyses the orthographic word
+// sequence and inserts liaison consonants into Fragment.Transformed when
+// appropriate. The original text and fragment coordinates are preserved.
+func (p *FrenchLiaison) Apply(ctx context.Context, in <-chan textual.Result) <-chan textual.Result {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-// StreamApply implements CancellableProcessor. It emits a single Result.
-func (p *FrenchLiaisonProcessor) StreamApply(ctx context.Context, input textual.Result) <-chan textual.Result {
-	out := make(chan textual.Result, 1)
+	out := make(chan textual.Result)
 
 	go func() {
 		defer close(out)
 
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
+		for {
+			select {
+			case <-ctx.Done():
+				// Stop emitting results but drain upstream to avoid
+				// blocking senders.
+				for range in {
+				}
+				return
+			case res, ok := <-in:
+				if !ok {
+					// Upstream closed: no more input.
+					return
+				}
 
-		res := p.apply(input)
+				processed := p.processResult(res)
 
-		select {
-		case <-ctx.Done():
-			return
-		case out <- res:
+				select {
+				case <-ctx.Done():
+					// Context canceled while sending.
+					return
+				case out <- processed:
+				}
+			}
 		}
 	}()
 
 	return out
 }
 
-// apply takes a g2p Result and returns a new Result with liaison
+// --- tokens and helpers ---
+
+type orthToken struct {
+	text      string
+	norm      string
+	runeStart int
+	runeLen   int
+	fragIndex int
+}
+
+// processResult takes a g2p Result and returns a new Result with liaison
 // consonants inserted into Fragment.Transformed when appropriate.
-func (p *FrenchLiaisonProcessor) apply(res textual.Result) textual.Result {
+func (p *FrenchLiaison) processResult(res textual.Result) textual.Result {
 	if len(res.Text) == 0 || len(res.Fragments) == 0 {
 		return res
 	}
@@ -154,16 +193,6 @@ func (p *FrenchLiaisonProcessor) apply(res textual.Result) textual.Result {
 	}
 
 	return out
-}
-
-// --- tokens and helpers ---
-
-type orthToken struct {
-	text      string
-	norm      string
-	runeStart int
-	runeLen   int
-	fragIndex int
 }
 
 func tokenizeFrenchWords(text string) []orthToken {
@@ -259,7 +288,7 @@ func hasStrongBoundary(runes []rune, left, right *orthToken) bool {
 }
 
 // startsWithVowelOrHMuet: right word must start with vowel or non‑aspirated h.
-func (p *FrenchLiaisonProcessor) startsWithVowelOrHMuet(left, right string) bool {
+func (p *FrenchLiaison) startsWithVowelOrHMuet(left, right string) bool {
 	norm := tolerantNormalize(right)
 	if norm == "" {
 		return false
@@ -284,7 +313,7 @@ func (p *FrenchLiaisonProcessor) startsWithVowelOrHMuet(left, right string) bool
 	return false
 }
 
-func (p *FrenchLiaisonProcessor) liaisonPhoneFor(tok *orthToken) string {
+func (p *FrenchLiaison) liaisonPhoneFor(tok *orthToken) string {
 	if _, forbidden := p.forbidBefore[tok.norm]; forbidden {
 		return ""
 	}
@@ -297,7 +326,7 @@ func (p *FrenchLiaisonProcessor) liaisonPhoneFor(tok *orthToken) string {
 	return ""
 }
 
-func (p *FrenchLiaisonProcessor) isLiaisonGiver(norm string) bool {
+func (p *FrenchLiaison) isLiaisonGiver(norm string) bool {
 	if _, ok := p.determinersZ[norm]; ok {
 		return true
 	}
@@ -325,7 +354,7 @@ func (p *FrenchLiaisonProcessor) isLiaisonGiver(norm string) bool {
 	return false
 }
 
-func (p *FrenchLiaisonProcessor) guessLiaisonPhone(word string) string {
+func (p *FrenchLiaison) guessLiaisonPhone(word string) string {
 	lower := tolerantNormalize(word)
 
 	if _, ok := p.determinersZ[lower]; ok {
@@ -382,7 +411,7 @@ func lastLetter(s string) rune {
 	return 0
 }
 
-func (p *FrenchLiaisonProcessor) insertLiaisonConsonant(leftFrag, rightFrag *textual.Fragment, phone string) {
+func (p *FrenchLiaison) insertLiaisonConsonant(leftFrag, rightFrag *textual.Fragment, phone string) {
 	phone = strings.TrimSpace(phone)
 	if phone == "" || leftFrag == nil {
 		return
