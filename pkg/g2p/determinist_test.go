@@ -58,6 +58,39 @@ func renderPhoneticOrRaw(res textual.Result) string {
 	return b.String()
 }
 
+// runProcessorOnSingleInput runs a textual.Processor on a single input
+// Result and returns the single output Result emitted by the processor.
+// Tests rely on the 1:1 semantics of Determinist and simple chains.
+func runProcessorOnSingleInput(t *testing.T, p textual.Processor, input textual.Result) textual.Result {
+	t.Helper()
+
+	ctx := context.Background()
+	in := make(chan textual.Result, 1)
+	in <- input
+	close(in)
+
+	outCh := p.Apply(ctx, in)
+
+	var results []textual.Result
+	for res := range outCh {
+		results = append(results, res)
+	}
+
+	if len(results) == 0 {
+		t.Fatalf("processor produced no Result")
+	}
+	if len(results) > 1 {
+		t.Fatalf("processor produced %d Results, want 1", len(results))
+	}
+	return results[0]
+}
+
+// runDeterministOnText is a convenience helper specialised for
+// Determinist that starts from a plain UTF‑8 string.
+func runDeterministOnText(t *testing.T, d *Determinist, text textual.UTF8String) textual.Result {
+	return runProcessorOnSingleInput(t, d, textual.Input(text))
+}
+
 // TestScanProgressiveThroughUnknownChunkWithPartialMatch verifies that
 // the scanner continues to make progress past unknown substrings when
 // partial matching is allowed. In particular it must still be able to
@@ -68,11 +101,11 @@ func TestScanProgressiveThroughUnknownChunkWithPartialMatch(t *testing.T) {
 		"le":     {"lə"},
 	}
 
-	d := NewDeterminist(langDict)
-	res := d.ScanWithOptions("Le GrosBenoit", DeterministOptions{
+	d := NewDeterministWithOptions(langDict, DeterministOptions{
 		DiacriticInsensitive: true,
 		AllowPartialMatch:    true,
 	})
+	res := runDeterministOnText(t, d, "Le GrosBenoit")
 
 	if got, want := len(res.Fragments), 2; got != want {
 		t.Fatalf("expected %d fragments, got %d", want, got)
@@ -115,11 +148,11 @@ func TestScanProgressiveThroughUnknownChunkWithoutPartialMatch(t *testing.T) {
 		"le":     {"lə"},
 	}
 
-	d := NewDeterminist(langDict)
-	res := d.ScanWithOptions("Le GrosBenoit", DeterministOptions{
+	d := NewDeterministWithOptions(langDict, DeterministOptions{
 		DiacriticInsensitive: true,
 		AllowPartialMatch:    false,
 	})
+	res := runDeterministOnText(t, d, "Le GrosBenoit")
 
 	if got, want := len(res.Fragments), 1; got != want {
 		t.Fatalf("expected %d fragment, got %d (fragments=%+v)", want, got, res.Fragments)
@@ -162,11 +195,11 @@ func TestScanTolerantDiacritics(t *testing.T) {
 		"garçon": {"garsɔ̃"},
 	}
 
-	d := NewDeterminist(langDict)
-
 	// Strict mode (default options) should not match "garcon" when only
 	// "garçon" exists in the dictionary.
-	strict := d.Scan("garcon")
+	dStrict := NewDeterminist(langDict)
+	strict := runDeterministOnText(t, dStrict, "garcon")
+
 	if len(strict.Fragments) != 0 {
 		t.Fatalf("expected no fragments in strict mode, got %d", len(strict.Fragments))
 	}
@@ -180,9 +213,10 @@ func TestScanTolerantDiacritics(t *testing.T) {
 		DiacriticInsensitive: true,
 		AllowPartialMatch:    true,
 	}
+	dTolerant := NewDeterministWithOptions(langDict, opts)
 
 	// Tolerant mode should match and produce a single fragment.
-	tolerant := d.ScanWithOptions("garcon", opts)
+	tolerant := runDeterministOnText(t, dTolerant, "garcon")
 	rawTexts = tolerant.RawTexts()
 	if got, want := len(tolerant.Fragments), 1; got != want {
 		t.Fatalf("expected %d fragment in tolerant mode, got %d", want, got)
@@ -210,15 +244,14 @@ func TestAllowPartialMatchControlsSingleGrapheme(t *testing.T) {
 		"a": {"A"},
 	}
 
-	d := NewDeterminist(langDict)
-
 	// Baseline behaviour: with partial matching allowed, the inner "a"
 	// of "bar" can be matched using the single‑rune entry "a".
 	baseOpts := DeterministOptions{
 		DiacriticInsensitive: false,
 		AllowPartialMatch:    true,
 	}
-	base := d.ScanWithOptions("bar a", baseOpts)
+	dBase := NewDeterministWithOptions(langDict, baseOpts)
+	base := runDeterministOnText(t, dBase, "bar a")
 
 	foundInsideBar := false
 	for _, f := range base.Fragments {
@@ -238,7 +271,8 @@ func TestAllowPartialMatchControlsSingleGrapheme(t *testing.T) {
 		AllowPartialMatch:    false,
 	}
 
-	res := d.ScanWithOptions("bar a", opts)
+	dStrict := NewDeterministWithOptions(langDict, opts)
+	res := runDeterministOnText(t, dStrict, "bar a")
 
 	if got, want := len(res.Fragments), 1; got != want {
 		t.Fatalf("with AllowPartialMatch=false: expected %d fragment, got %d (fragments=%#v)", want, got, res.Fragments)
@@ -264,14 +298,12 @@ func TestAllowPartialMatchIsolatedWord(t *testing.T) {
 		"a": {"A"},
 	}
 
-	d := NewDeterminist(langDict)
-
-	opts := DeterministOptions{
+	d := NewDeterministWithOptions(langDict, DeterministOptions{
 		DiacriticInsensitive: false,
 		AllowPartialMatch:    false,
-	}
+	})
 
-	res := d.ScanWithOptions("a", opts)
+	res := runDeterministOnText(t, d, "a")
 	rawTexts := res.RawTexts()
 	if got, want := len(res.Fragments), 1; got != want {
 		t.Fatalf("expected %d fragment, got %d", want, got)
@@ -302,7 +334,6 @@ func TestAllowPartialMatchFullToken(t *testing.T) {
 		"d": {"4"},
 	}
 
-	d := NewDeterminist(langDict)
 	text := "abcdE"
 
 	// Case 1: AllowPartialMatch = false
@@ -310,7 +341,9 @@ func TestAllowPartialMatchFullToken(t *testing.T) {
 		DiacriticInsensitive: false,
 		AllowPartialMatch:    false,
 	}
-	resStrict := d.ScanWithOptions(textual.UTF8String(text), optsStrict)
+	dStrict := NewDeterministWithOptions(langDict, optsStrict)
+	resStrict := runDeterministOnText(t, dStrict, textual.UTF8String(text))
+
 	rawTexts := resStrict.RawTexts()
 	if got, want := len(resStrict.Fragments), 0; got != want {
 		t.Fatalf("AllowPartialMatch=false: expected %d fragments, got %d (%+v)", want, got, resStrict.Fragments)
@@ -333,7 +366,9 @@ func TestAllowPartialMatchFullToken(t *testing.T) {
 		DiacriticInsensitive: false,
 		AllowPartialMatch:    true,
 	}
-	resDecompose := d.ScanWithOptions(textual.UTF8String(text), optsDecompose)
+	dDecompose := NewDeterministWithOptions(langDict, optsDecompose)
+	resDecompose := runDeterministOnText(t, dDecompose, textual.UTF8String(text))
+
 	rawTexts = resDecompose.RawTexts()
 	if got, want := len(resDecompose.Fragments), 4; got != want {
 		t.Fatalf("AllowPartialMatch=true: expected %d fragments, got %d (%+v)", want, got, resDecompose.Fragments)
@@ -373,13 +408,13 @@ func TestDeterministDoesNotDecomposeUnknownSingleWord(t *testing.T) {
 		"ena":  {"E"},
 	}
 
-	d := NewDeterminist(langDict)
-	text := "Fontenay"
-
-	res := d.ScanWithOptions(textual.UTF8String(text), DeterministOptions{
+	d := NewDeterministWithOptions(langDict, DeterministOptions{
 		DiacriticInsensitive: false,
 		AllowPartialMatch:    false,
 	})
+	text := "Fontenay"
+
+	res := runDeterministOnText(t, d, textual.UTF8String(text))
 
 	rawTexts := res.RawTexts()
 	// Desired behaviour: no internal breakdown of "Fontenay" into "Font" + "ena".
@@ -406,13 +441,13 @@ func TestDeterministCanDecomposeUnknownSingleWordWhenAllowed(t *testing.T) {
 		"ena":  {"E"},
 	}
 
-	d := NewDeterminist(langDict)
-	text := "Fontenay"
-
-	res := d.ScanWithOptions(textual.UTF8String(text), DeterministOptions{
+	d := NewDeterministWithOptions(langDict, DeterministOptions{
 		DiacriticInsensitive: false,
 		AllowPartialMatch:    true,
 	})
+	text := "Fontenay"
+
+	res := runDeterministOnText(t, d, textual.UTF8String(text))
 	rawTexts := res.RawTexts()
 	if got, want := len(res.Fragments), 2; got != want {
 		t.Fatalf("expected %d fragments for %q, got %d (%+v)", want, text, got, res.Fragments)
@@ -452,7 +487,7 @@ func TestDeterministStillSupportsMultilingualSequences(t *testing.T) {
 	text := "東京大学"
 
 	// Use the default options (AllowPartialMatch=true).
-	res := d.Scan(textual.UTF8String(text))
+	res := runDeterministOnText(t, d, textual.UTF8String(text))
 	rawTexts := res.RawTexts()
 	if got, want := len(res.Fragments), 2; got != want {
 		t.Fatalf("expected %d fragments for %q, got %d (%+v)", want, text, got, res.Fragments)
@@ -482,16 +517,17 @@ func TestDeterministCustomDelimiters(t *testing.T) {
 		"bar": {"B"},
 	}
 
-	d := NewDeterminist(langDict)
+	// Use the same options for all passes; only delimiters change.
+	d := NewDeterministWithOptions(langDict, DeterministOptions{
+		DiacriticInsensitive: false,
+		AllowPartialMatch:    false,
+	})
 	text := "foo,bar"
 
 	// Default delimiters: comma acts as a delimiter (punctuation), so
 	// both "foo" and "bar" can be matched as separate expressions when
 	// AllowPartialMatch=false.
-	resDefault := d.ScanWithOptions(textual.UTF8String(text), DeterministOptions{
-		DiacriticInsensitive: false,
-		AllowPartialMatch:    false,
-	})
+	resDefault := runDeterministOnText(t, d, textual.UTF8String(text))
 
 	if got, want := len(resDefault.Fragments), 2; got != want {
 		t.Fatalf("default delimiters: expected %d fragments, got %d (%+v)", want, got, resDefault.Fragments)
@@ -511,10 +547,7 @@ func TestDeterministCustomDelimiters(t *testing.T) {
 	// AllowPartialMatch=false there should be no match.
 	d.SetDelimiters([]rune{' '})
 
-	resCustom := d.ScanWithOptions(textual.UTF8String(text), DeterministOptions{
-		DiacriticInsensitive: false,
-		AllowPartialMatch:    false,
-	})
+	resCustom := runDeterministOnText(t, d, textual.UTF8String(text))
 	rawTexts := resCustom.RawTexts()
 
 	if got, want := len(resCustom.Fragments), 0; got != want {
@@ -550,17 +583,12 @@ func TestDeterministApplyChain(t *testing.T) {
 
 	text := "foo bar baz"
 
-	// First pass: only "foo" is recognized.
-	res1 := d1.Scan(textual.UTF8String(text))
-	if got, want := len(res1.Fragments), 1; got != want {
-		t.Fatalf("after pass1: expected %d fragment, got %d (%+v)", want, got, res1.Fragments)
-	}
+	// Wire the three Determinist processors into a Chain to exercise the
+	// textual.Processor implementation.
+	chain := textual.NewChain(d1, d2, d3)
 
-	// Second pass: process remaining raw text with dict2.
-	res2 := d2.Apply(res1)
-
-	// Third pass: process remaining raw text with dict3.
-	res3 := d3.Apply(res2)
+	base := textual.Input(textual.UTF8String(text))
+	res3 := runProcessorOnSingleInput(t, chain, base)
 
 	if got, want := len(res3.Fragments), 3; got != want {
 		t.Fatalf("after chain: expected %d fragments, got %d (%+v)", want, got, res3.Fragments)
@@ -577,8 +605,9 @@ func TestDeterministApplyChain(t *testing.T) {
 	}
 }
 
-// TestDeterministStreamApply ensures that the CancellableProcessor
-// implementation emits the same result as Apply.
+// TestDeterministStreamApply ensures that the textual.Processor
+// implementation emits the same result as the internal single‑Result
+// implementation used by applyWithOptions.
 func TestDeterministStreamApply(t *testing.T) {
 	dict := phono.Dictionary{
 		"foo": {"fu"},
@@ -590,17 +619,26 @@ func TestDeterministStreamApply(t *testing.T) {
 		Text: textual.UTF8String(text),
 	}
 
-	want := d.Apply(base)
+	want := d.applyWithOptions(base, d.Options())
 
 	ctx := context.Background()
-	ch := d.StreamApply(ctx, base)
+	in := make(chan textual.Result, 1)
+	in <- base
+	close(in)
+
+	ch := d.Apply(ctx, in)
 
 	got, ok := <-ch
 	if !ok {
-		t.Fatalf("expected a result from StreamApply, got closed channel")
+		t.Fatalf("expected a result from Determinist.Apply, got closed channel")
 	}
 
 	if len(got.Fragments) != len(want.Fragments) || len(got.RawTexts()) != len(want.RawTexts()) {
-		t.Fatalf("StreamApply result differs from Apply: got=%+v want=%+v", got, want)
+		t.Fatalf("Apply result differs from applyWithOptions: got=%+v want=%+v", got, want)
+	}
+
+	// Channel must be closed after the single Result.
+	if _, ok := <-ch; ok {
+		t.Fatalf("expected output channel to be closed after single result")
 	}
 }

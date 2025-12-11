@@ -22,6 +22,9 @@ type DeterministOptions struct {
 
 // Determinist is a greedy, dictionary‑based grapheme‑to‑phoneme (g2p)
 // processor working on textual.Result.
+//
+// It implements textual.Processor and can therefore be used directly in
+// textual.Chain, Router, IOReaderProcessor, Transformation, etc.
 type Determinist struct {
 	// langDict is the main phonetic dictionary for the processor.
 	langDict phono.Dictionary
@@ -33,7 +36,9 @@ type Determinist struct {
 	// langMaxKeyLen caches the maximum key length (in runes).
 	langMaxKeyLen int
 
-	// options is the default configuration used by Scan / Apply.
+	// options is the default configuration used by Apply. It can be
+	// adjusted via SetOptions before wiring the Determinist into a
+	// textual pipeline.
 	options DeterministOptions
 
 	// picker encapsulates the strategy used to select pronunciations.
@@ -80,7 +85,11 @@ func (d *Determinist) Options() DeterministOptions {
 	return d.options
 }
 
-// SetOptions changes the default options used by Scan / Apply.
+// SetOptions changes the default options used by Apply.
+//
+// Callers are expected to configure options once, before wiring the
+// Determinist into a textual pipeline. Concurrent mutation of options
+// is not synchronized.
 func (d *Determinist) SetOptions(opts DeterministOptions) {
 	d.options = opts
 }
@@ -99,67 +108,56 @@ func (d *Determinist) SetDelimiters(delims []rune) {
 	d.delimiters = m
 }
 
-// Scan is a convenience helper that runs the Determinist on raw text
-// using its current default options.
-func (d *Determinist) Scan(text textual.UTF8String) textual.Result {
-	return d.ScanWithOptions(text, d.options)
-}
+// Apply implements the textual.Processor interface.
+//
+// For each incoming Result, it:
+//
+//   - computes the current RawTexts from existing fragments;
+//   - runs the Determinist on each RawText using the current options
+//     and dictionary;
+//   - appends newly discovered fragments while preserving existing ones.
+//
+// Raw texts are not recomputed here; callers can obtain them on demand
+// via Result.RawTexts().
+func (d *Determinist) Apply(ctx context.Context, in <-chan textual.Result) <-chan textual.Result {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-// ScanWithOptions converts the given text into phonetic fragments and
-// raw spans, using the provided options.
-//
-// The text is wrapped in a textual.Result with no fragments, then Apply
-// is called with the given options.
-func (d *Determinist) ScanWithOptions(text textual.UTF8String, opts DeterministOptions) textual.Result {
-	initial := textual.Input(text)
-	return d.applyWithOptions(initial, opts)
-}
-
-// Apply implements the g2p.Processor interface.
-//
-// It scans only the RawTexts of the input Result using the Determinist's
-// current options and dictionary:
-//
-//   - existing Fragments are preserved;
-//   - new Fragments are added for portions of RawTexts that can be
-//     recognized;
-//   - RawTexts are recomputed from the new fragment set.
-//
-// This makes it easy to chain multiple Determinist instances.
-func (d *Determinist) Apply(input textual.Result) textual.Result {
-	return d.applyWithOptions(input, d.options)
-}
-
-// StreamApply implements the CancellableProcessor interface.
-//
-// The current implementation emits a single Result on the returned
-// channel. Cancellation is observed before and after the processing.
-func (d *Determinist) StreamApply(ctx context.Context, input textual.Result) <-chan textual.Result {
-	out := make(chan textual.Result, 1)
+	out := make(chan textual.Result)
 
 	go func() {
 		defer close(out)
 
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
+		for {
+			select {
+			case <-ctx.Done():
+				// Drain the input channel to avoid blocking upstream
+				// senders, but stop forwarding results.
+				for range in {
+				}
+				return
+			case res, ok := <-in:
+				if !ok {
+					return
+				}
 
-		res := d.applyWithOptions(input, d.options)
+				processed := d.applyWithOptions(res, d.options)
 
-		select {
-		case <-ctx.Done():
-			return
-		case out <- res:
+				select {
+				case <-ctx.Done():
+					// Context canceled while trying to send.
+					return
+				case out <- processed:
+				}
+			}
 		}
 	}()
 
 	return out
 }
 
-// applyWithOptions is the internal implementation used by ScanWithOptions,
-// Apply, and StreamApply.
+// applyWithOptions is the internal implementation used by Apply.
 //
 // It processes all RawTexts of the input Result independently, using
 // the same dictionary and options, then merges the newly discovered
@@ -296,7 +294,7 @@ func (d *Determinist) scanSegment(
 	// is raw.
 	if maxKeyLen <= 0 || len(normalized) == 0 || len(dictionary) == 0 {
 		rawTexts = append(rawTexts, textual.RawText{
-			Text: textual.UTF8String(text),
+			Text: text,
 			Pos:  offset,
 			Len:  n,
 		})
@@ -352,7 +350,7 @@ func (d *Determinist) scanSegment(
 			// Flush any pending raw text before emitting fragments.
 			if currentRawStart != -1 && currentRawStart < i {
 				rawTexts = append(rawTexts, textual.RawText{
-					Text: textual.UTF8String(string(runes[currentRawStart:i])),
+					Text: textual.UTF8String(runes[currentRawStart:i]),
 					Pos:  offset + currentRawStart,
 					Len:  i - currentRawStart,
 				})
@@ -361,7 +359,7 @@ func (d *Determinist) scanSegment(
 
 			for variantIndex, opt := range options {
 				fragments = append(fragments, textual.Fragment{
-					Transformed: textual.UTF8String(opt.S),
+					Transformed: opt.S,
 					Pos:         offset + i,
 					Len:         l,
 					Confidence:  passConfidence * opt.C,
@@ -385,7 +383,7 @@ func (d *Determinist) scanSegment(
 	// Flush trailing raw text, if any.
 	if currentRawStart != -1 && currentRawStart < n {
 		rawTexts = append(rawTexts, textual.RawText{
-			Text: textual.UTF8String(string(runes[currentRawStart:n])),
+			Text: textual.UTF8String(runes[currentRawStart:n]),
 			Pos:  offset + currentRawStart,
 			Len:  n - currentRawStart,
 		})
