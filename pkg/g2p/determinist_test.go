@@ -20,7 +20,7 @@ import (
 // for simple tests; it is **not** a general renderer for all pipelines,
 // but it is sufficient to validate AllowPartialMatch behaviour and
 // basic scan properties.
-func renderPhoneticOrRaw(res textual.Result) string {
+func renderPhoneticOrRaw(res textual.Parcel) string {
 	runes := []rune(res.Text)
 	if len(runes) == 0 {
 		return ""
@@ -59,25 +59,25 @@ func renderPhoneticOrRaw(res textual.Result) string {
 }
 
 // runProcessorOnSingleInput runs a textual.Processor on a single input
-// Result and returns the single output Result emitted by the processor.
+// Parcel and returns the single output Parcel emitted by the processor.
 // Tests rely on the 1:1 semantics of Determinist and simple chains.
-func runProcessorOnSingleInput(t *testing.T, p textual.Processor, input textual.Result) textual.Result {
+func runProcessorOnSingleInput(t *testing.T, p textual.Processor[textual.Parcel], input textual.Parcel) textual.Parcel {
 	t.Helper()
 
 	ctx := context.Background()
-	in := make(chan textual.Result, 1)
+	in := make(chan textual.Parcel, 1)
 	in <- input
 	close(in)
 
 	outCh := p.Apply(ctx, in)
 
-	var results []textual.Result
+	var results []textual.Parcel
 	for res := range outCh {
 		results = append(results, res)
 	}
 
 	if len(results) == 0 {
-		t.Fatalf("processor produced no Result")
+		t.Fatalf("processor produced no Parcel")
 	}
 	if len(results) > 1 {
 		t.Fatalf("processor produced %d Results, want 1", len(results))
@@ -87,8 +87,9 @@ func runProcessorOnSingleInput(t *testing.T, p textual.Processor, input textual.
 
 // runDeterministOnText is a convenience helper specialised for
 // Determinist that starts from a plain UTF‑8 string.
-func runDeterministOnText(t *testing.T, d *Determinist, text textual.UTF8String) textual.Result {
-	return runProcessorOnSingleInput(t, d, textual.Input(text))
+func runDeterministOnText(t *testing.T, d *Determinist[textual.Parcel], text textual.UTF8String) textual.Parcel {
+	proto := textual.Parcel{}
+	return runProcessorOnSingleInput(t, d, proto.FromUTF8String(text))
 }
 
 // TestScanProgressiveThroughUnknownChunkWithPartialMatch verifies that
@@ -577,6 +578,8 @@ func TestDeterministApplyChain(t *testing.T) {
 		"baz": {"bz"},
 	}
 
+	proto := textual.Parcel{}
+
 	d1 := NewDeterminist(dict1) // strict
 	d2 := NewDeterminist(dict2) // strict
 	d3 := NewDeterminist(dict3) // strict
@@ -587,7 +590,7 @@ func TestDeterministApplyChain(t *testing.T) {
 	// textual.Processor implementation.
 	chain := textual.NewChain(d1, d2, d3)
 
-	base := textual.Input(textual.UTF8String(text))
+	base := proto.FromUTF8String(text)
 	res3 := runProcessorOnSingleInput(t, chain, base)
 
 	if got, want := len(res3.Fragments), 3; got != want {
@@ -606,7 +609,7 @@ func TestDeterministApplyChain(t *testing.T) {
 }
 
 // TestDeterministStreamApply ensures that the textual.Processor
-// implementation emits the same result as the internal single‑Result
+// implementation emits the same result as the internal single‑Parcel
 // implementation used by applyWithOptions.
 func TestDeterministStreamApply(t *testing.T) {
 	dict := phono.Dictionary{
@@ -615,14 +618,14 @@ func TestDeterministStreamApply(t *testing.T) {
 	d := NewDeterminist(dict)
 
 	text := "foo"
-	base := textual.Result{
+	base := textual.Parcel{
 		Text: textual.UTF8String(text),
 	}
 
 	want := d.applyWithOptions(base, d.Options())
 
 	ctx := context.Background()
-	in := make(chan textual.Result, 1)
+	in := make(chan textual.Parcel, 1)
 	in <- base
 	close(in)
 
@@ -637,7 +640,7 @@ func TestDeterministStreamApply(t *testing.T) {
 		t.Fatalf("Apply result differs from applyWithOptions: got=%+v want=%+v", got, want)
 	}
 
-	// Channel must be closed after the single Result.
+	// Channel must be closed after the single Parcel.
 	if _, ok := <-ch; ok {
 		t.Fatalf("expected output channel to be closed after single result")
 	}

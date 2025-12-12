@@ -21,11 +21,11 @@ type DeterministOptions struct {
 }
 
 // Determinist is a greedy, dictionary‑based grapheme‑to‑phoneme (g2p)
-// processor working on textual.Result.
+// processor working on textual.Parcel.
 //
 // It implements textual.Processor and can therefore be used directly in
 // textual.Chain, Router, IOReaderProcessor, Transformation, etc.
-type Determinist struct {
+type Determinist[S textual.Parcel] struct {
 	// langDict is the main phonetic dictionary for the processor.
 	langDict phono.Dictionary
 	// langDictNormKeyMap maps normalized surface forms to the original
@@ -57,15 +57,15 @@ var DefaultDeterministOptions = DeterministOptions{
 
 // NewDeterminist creates a new Determinist with the given dictionary
 // and DefaultDeterministOptions (strict mode).
-func NewDeterminist(langDict phono.Dictionary) *Determinist {
-	return NewDeterministWithOptions(langDict, DefaultDeterministOptions)
+func NewDeterminist[S textual.Parcel](langDict phono.Dictionary) *Determinist[S] {
+	return NewDeterministWithOptions[S](langDict, DefaultDeterministOptions)
 }
 
 // NewDeterministWithOptions creates a Determinist bound to langDict and
 // configured with the provided options.
-func NewDeterministWithOptions(langDict phono.Dictionary, opts DeterministOptions) *Determinist {
+func NewDeterministWithOptions[S textual.Parcel](langDict phono.Dictionary, opts DeterministOptions) *Determinist[S] {
 	langNorm := langDict.NormalizedKeys()
-	d := &Determinist{
+	d := &Determinist[S]{
 		langDict:           langDict,
 		langDictNormKeyMap: langNorm,
 		langMaxKeyLen:      langDict.MaxKeyLen(),
@@ -81,7 +81,7 @@ func NewDeterministWithOptions(langDict phono.Dictionary, opts DeterministOption
 }
 
 // Options returns the current default options of the Determinist.
-func (d *Determinist) Options() DeterministOptions {
+func (d *Determinist[S]) Options() DeterministOptions {
 	return d.options
 }
 
@@ -90,13 +90,13 @@ func (d *Determinist) Options() DeterministOptions {
 // Callers are expected to configure options once, before wiring the
 // Determinist into a textual pipeline. Concurrent mutation of options
 // is not synchronized.
-func (d *Determinist) SetOptions(opts DeterministOptions) {
+func (d *Determinist[S]) SetOptions(opts DeterministOptions) {
 	d.options = opts
 }
 
 // SetDelimiters configures the set of runes that are treated as
 // expression delimiters when AllowPartialMatch is false.
-func (d *Determinist) SetDelimiters(delims []rune) {
+func (d *Determinist[S]) SetDelimiters(delims []rune) {
 	if len(delims) == 0 {
 		d.delimiters = nil
 		return
@@ -110,7 +110,7 @@ func (d *Determinist) SetDelimiters(delims []rune) {
 
 // Apply implements the textual.Processor interface.
 //
-// For each incoming Result, it:
+// For each incoming Parcel, it:
 //
 //   - computes the current RawTexts from existing fragments;
 //   - runs the Determinist on each RawText using the current options
@@ -118,13 +118,13 @@ func (d *Determinist) SetDelimiters(delims []rune) {
 //   - appends newly discovered fragments while preserving existing ones.
 //
 // Raw texts are not recomputed here; callers can obtain them on demand
-// via Result.RawTexts().
-func (d *Determinist) Apply(ctx context.Context, in <-chan textual.Result) <-chan textual.Result {
+// via Parcel.RawTexts().
+func (d *Determinist[S]) Apply(ctx context.Context, in <-chan textual.Parcel) <-chan textual.Parcel {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	out := make(chan textual.Result)
+	out := make(chan textual.Parcel)
 
 	go func() {
 		defer close(out)
@@ -159,10 +159,10 @@ func (d *Determinist) Apply(ctx context.Context, in <-chan textual.Result) <-cha
 
 // applyWithOptions is the internal implementation used by Apply.
 //
-// It processes all RawTexts of the input Result independently, using
+// It processes all RawTexts of the input Parcel independently, using
 // the same dictionary and options, then merges the newly discovered
-// fragments and recomputes raw spans via Result.RawTexts().
-func (d *Determinist) applyWithOptions(input textual.Result, opts DeterministOptions) textual.Result {
+// fragments and recomputes raw spans via Parcel.RawTexts().
+func (d *Determinist[S]) applyWithOptions(input textual.Parcel, opts DeterministOptions) textual.Parcel {
 	if len(input.Text) == 0 {
 		return input
 	}
@@ -207,7 +207,7 @@ func (d *Determinist) applyWithOptions(input textual.Result, opts DeterministOpt
 //
 // Positions in the returned fragments and raw spans are rune offsets
 // relative to the beginning of the original text (using offset).
-func (d *Determinist) scan(
+func (d *Determinist[S]) scan(
 	text textual.UTF8String,
 	opts DeterministOptions,
 	line string,
@@ -269,7 +269,7 @@ func (d *Determinist) scan(
 // segment using the provided normalization function and dictionary view.
 // The offset parameter indicates the rune position of the first rune of
 // text within the original input string.
-func (d *Determinist) scanSegment(
+func (d *Determinist[S]) scanSegment(
 	text textual.UTF8String,
 	offset int,
 	dictionary phono.Dictionary,
@@ -394,7 +394,7 @@ func (d *Determinist) scanSegment(
 
 // candidateIsWholeExpression reports whether the candidate substring
 // runes[start : start+length] coincides with "expression" boundaries.
-func (d *Determinist) candidateIsWholeExpression(runes []rune, start, length int) bool {
+func (d *Determinist[S]) candidateIsWholeExpression(runes []rune, start, length int) bool {
 	if length <= 0 {
 		return false
 	}
@@ -418,7 +418,7 @@ func (d *Determinist) candidateIsWholeExpression(runes []rune, start, length int
 
 // isDelimiterRune reports whether r is treated as an "expression
 // delimiter" for the purposes of AllowPartialMatch.
-func (d *Determinist) isDelimiterRune(r rune) bool {
+func (d *Determinist[S]) isDelimiterRune(r rune) bool {
 	if unicode.IsSpace(r) {
 		return true
 	}
