@@ -6,7 +6,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/benoit-pereira-da-silva/textual/pkg/textual"
+	"github.com/benoit-pereira-da-silva/textual/pkg/carrier"
 )
 
 // FrenchLiaison applies simple French liaison heuristics on top of a
@@ -14,7 +14,7 @@ import (
 //
 // It implements textual.Processor so that it can be used directly in
 // textual.Chain, Router, IOReaderProcessor, Transformation, etc.
-type FrenchLiaison[S textual.Parcel] struct {
+type FrenchLiaison[S carrier.Parcel] struct {
 	// allowLooseLiaison enables the optional heuristic that tries to
 	// guess liaison consonants for a broader set of words, beyond the
 	// curated determiner/pronoun/verb/adverb sets.
@@ -36,21 +36,21 @@ type FrenchLiaison[S textual.Parcel] struct {
 // NewFrenchLiaison constructs a conservative FrenchLiaison processor
 // that only inserts liaison consonants for a curated set of grammatical
 // contexts (determiners, pronouns, verbs, etc.).
-func NewFrenchLiaison[S textual.Parcel]() *FrenchLiaison[S] {
+func NewFrenchLiaison[S carrier.Parcel]() *FrenchLiaison[S] {
 	return newFrenchLiaison[S](false)
 }
 
 // NewFrenchLiaisonWithFallback constructs a FrenchLiaison processor that
 // also enables a loose heuristic to guess liaison consonants in a wider
 // range of contexts when they are not explicitly listed.
-func NewFrenchLiaisonWithFallback[S textual.Parcel]() *FrenchLiaison[S] {
+func NewFrenchLiaisonWithFallback[S carrier.Parcel]() *FrenchLiaison[S] {
 	return newFrenchLiaison[S](true)
 }
 
 // newFrenchLiaison initialises the internal lexicons used by the liaison
 // heuristics. The allowLoose flag controls whether the broader heuristic
 // is enabled.
-func newFrenchLiaison[S textual.Parcel](allowLoose bool) *FrenchLiaison[S] {
+func newFrenchLiaison[S carrier.Parcel](allowLoose bool) *FrenchLiaison[S] {
 	p := &FrenchLiaison[S]{
 		allowLooseLiaison: allowLoose,
 	}
@@ -97,12 +97,12 @@ func newFrenchLiaison[S textual.Parcel](allowLoose bool) *FrenchLiaison[S] {
 // For each incoming Parcel, FrenchLiaison analyses the orthographic word
 // sequence and inserts liaison consonants into Fragment.Transformed when
 // appropriate. The original text and fragment coordinates are preserved.
-func (p *FrenchLiaison[S]) Apply(ctx context.Context, in <-chan textual.Parcel) <-chan textual.Parcel {
+func (p *FrenchLiaison[S]) Apply(ctx context.Context, in <-chan carrier.Parcel) <-chan carrier.Parcel {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	out := make(chan textual.Parcel)
+	out := make(chan carrier.Parcel)
 
 	go func() {
 		defer close(out)
@@ -148,13 +148,13 @@ type orthToken struct {
 
 // processResult takes a g2p Parcel and returns a new Parcel with liaison
 // consonants inserted into Fragment.Transformed when appropriate.
-func (p *FrenchLiaison[S]) processResult(res textual.Parcel) textual.Parcel {
+func (p *FrenchLiaison[S]) processResult(res carrier.Parcel) carrier.Parcel {
 	if len(res.Text) == 0 || len(res.Fragments) == 0 {
 		return res
 	}
 
 	out := res
-	out.Fragments = make([]textual.Fragment, len(res.Fragments))
+	out.Fragments = make([]carrier.Fragment, len(res.Fragments))
 	copy(out.Fragments, res.Fragments)
 
 	runes := []rune(string(res.Text))
@@ -246,7 +246,7 @@ func isWordRune(r rune) bool {
 	}
 }
 
-func attachFragmentsToTokens(tokens []orthToken, fragments []textual.Fragment) {
+func attachFragmentsToTokens(tokens []orthToken, fragments []carrier.Fragment) {
 	if len(tokens) == 0 || len(fragments) == 0 {
 		return
 	}
@@ -411,7 +411,7 @@ func lastLetter(s string) rune {
 	return 0
 }
 
-func (p *FrenchLiaison[S]) insertLiaisonConsonant(leftFrag, rightFrag *textual.Fragment, phone string) {
+func (p *FrenchLiaison[S]) insertLiaisonConsonant(leftFrag, rightFrag *carrier.Fragment, phone string) {
 	phone = strings.TrimSpace(phone)
 	if phone == "" || leftFrag == nil {
 		return
@@ -420,11 +420,11 @@ func (p *FrenchLiaison[S]) insertLiaisonConsonant(leftFrag, rightFrag *textual.F
 	if rightFrag != nil {
 		base := strings.TrimSpace(string(rightFrag.Transformed))
 		if base != "" {
-			rightFrag.Transformed = textual.UTF8String(phone + base)
+			rightFrag.Transformed = carrier.UTF8String(phone + base)
 			return
 		}
 	}
-	leftFrag.Transformed = textual.UTF8String(appendLiaisonPhone(string(leftFrag.Transformed), phone))
+	leftFrag.Transformed = carrier.UTF8String(appendLiaisonPhone(string(leftFrag.Transformed), phone))
 }
 
 func appendLiaisonPhone(base, phone string) string {

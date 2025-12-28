@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/benoit-pereira-da-silva/textual/pkg/carrier"
 	"github.com/benoit-pereira-da-silva/textual/pkg/textual"
 	"github.com/temporal-IPA/tipa/pkg/phono"
 )
@@ -20,14 +21,14 @@ import (
 // for simple tests; it is **not** a general renderer for all pipelines,
 // but it is sufficient to validate AllowPartialMatch behaviour and
 // basic scan properties.
-func renderPhoneticOrRaw(res textual.Parcel) string {
+func renderPhoneticOrRaw(res carrier.Parcel) string {
 	runes := []rune(res.Text)
 	if len(runes) == 0 {
 		return ""
 	}
 
 	type span struct {
-		s textual.UTF8String
+		s carrier.UTF8String
 		l int
 	}
 
@@ -61,17 +62,17 @@ func renderPhoneticOrRaw(res textual.Parcel) string {
 // runProcessorOnSingleInput runs a textual.Processor on a single input
 // Parcel and returns the single output Parcel emitted by the processor.
 // Tests rely on the 1:1 semantics of Determinist and simple chains.
-func runProcessorOnSingleInput(t *testing.T, p textual.Processor[textual.Parcel], input textual.Parcel) textual.Parcel {
+func runProcessorOnSingleInput(t *testing.T, p textual.Processor[carrier.Parcel], input carrier.Parcel) carrier.Parcel {
 	t.Helper()
 
 	ctx := context.Background()
-	in := make(chan textual.Parcel, 1)
+	in := make(chan carrier.Parcel, 1)
 	in <- input
 	close(in)
 
 	outCh := p.Apply(ctx, in)
 
-	var results []textual.Parcel
+	var results []carrier.Parcel
 	for res := range outCh {
 		results = append(results, res)
 	}
@@ -87,8 +88,8 @@ func runProcessorOnSingleInput(t *testing.T, p textual.Processor[textual.Parcel]
 
 // runDeterministOnText is a convenience helper specialised for
 // Determinist that starts from a plain UTF‑8 string.
-func runDeterministOnText(t *testing.T, d *Determinist[textual.Parcel], text textual.UTF8String) textual.Parcel {
-	proto := textual.Parcel{}
+func runDeterministOnText(t *testing.T, d *Determinist[carrier.Parcel], text carrier.UTF8String) carrier.Parcel {
+	proto := carrier.Parcel{}
 	return runProcessorOnSingleInput(t, d, proto.FromUTF8String(text))
 }
 
@@ -343,7 +344,7 @@ func TestAllowPartialMatchFullToken(t *testing.T) {
 		AllowPartialMatch:    false,
 	}
 	dStrict := NewDeterministWithOptions(langDict, optsStrict)
-	resStrict := runDeterministOnText(t, dStrict, textual.UTF8String(text))
+	resStrict := runDeterministOnText(t, dStrict, carrier.UTF8String(text))
 
 	rawTexts := resStrict.RawTexts()
 	if got, want := len(resStrict.Fragments), 0; got != want {
@@ -368,7 +369,7 @@ func TestAllowPartialMatchFullToken(t *testing.T) {
 		AllowPartialMatch:    true,
 	}
 	dDecompose := NewDeterministWithOptions(langDict, optsDecompose)
-	resDecompose := runDeterministOnText(t, dDecompose, textual.UTF8String(text))
+	resDecompose := runDeterministOnText(t, dDecompose, carrier.UTF8String(text))
 
 	rawTexts = resDecompose.RawTexts()
 	if got, want := len(resDecompose.Fragments), 4; got != want {
@@ -415,7 +416,7 @@ func TestDeterministDoesNotDecomposeUnknownSingleWord(t *testing.T) {
 	})
 	text := "Fontenay"
 
-	res := runDeterministOnText(t, d, textual.UTF8String(text))
+	res := runDeterministOnText(t, d, carrier.UTF8String(text))
 
 	rawTexts := res.RawTexts()
 	// Desired behaviour: no internal breakdown of "Fontenay" into "Font" + "ena".
@@ -448,7 +449,7 @@ func TestDeterministCanDecomposeUnknownSingleWordWhenAllowed(t *testing.T) {
 	})
 	text := "Fontenay"
 
-	res := runDeterministOnText(t, d, textual.UTF8String(text))
+	res := runDeterministOnText(t, d, carrier.UTF8String(text))
 	rawTexts := res.RawTexts()
 	if got, want := len(res.Fragments), 2; got != want {
 		t.Fatalf("expected %d fragments for %q, got %d (%+v)", want, text, got, res.Fragments)
@@ -488,7 +489,7 @@ func TestDeterministStillSupportsMultilingualSequences(t *testing.T) {
 	text := "東京大学"
 
 	// Use the default options (AllowPartialMatch=true).
-	res := runDeterministOnText(t, d, textual.UTF8String(text))
+	res := runDeterministOnText(t, d, carrier.UTF8String(text))
 	rawTexts := res.RawTexts()
 	if got, want := len(res.Fragments), 2; got != want {
 		t.Fatalf("expected %d fragments for %q, got %d (%+v)", want, text, got, res.Fragments)
@@ -528,7 +529,7 @@ func TestDeterministCustomDelimiters(t *testing.T) {
 	// Default delimiters: comma acts as a delimiter (punctuation), so
 	// both "foo" and "bar" can be matched as separate expressions when
 	// AllowPartialMatch=false.
-	resDefault := runDeterministOnText(t, d, textual.UTF8String(text))
+	resDefault := runDeterministOnText(t, d, carrier.UTF8String(text))
 
 	if got, want := len(resDefault.Fragments), 2; got != want {
 		t.Fatalf("default delimiters: expected %d fragments, got %d (%+v)", want, got, resDefault.Fragments)
@@ -548,7 +549,7 @@ func TestDeterministCustomDelimiters(t *testing.T) {
 	// AllowPartialMatch=false there should be no match.
 	d.SetDelimiters([]rune{' '})
 
-	resCustom := runDeterministOnText(t, d, textual.UTF8String(text))
+	resCustom := runDeterministOnText(t, d, carrier.UTF8String(text))
 	rawTexts := resCustom.RawTexts()
 
 	if got, want := len(resCustom.Fragments), 0; got != want {
@@ -578,7 +579,7 @@ func TestDeterministApplyChain(t *testing.T) {
 		"baz": {"bz"},
 	}
 
-	proto := textual.Parcel{}
+	proto := carrier.Parcel{}
 
 	d1 := NewDeterminist(dict1) // strict
 	d2 := NewDeterminist(dict2) // strict
@@ -618,14 +619,14 @@ func TestDeterministStreamApply(t *testing.T) {
 	d := NewDeterminist(dict)
 
 	text := "foo"
-	base := textual.Parcel{
-		Text: textual.UTF8String(text),
+	base := carrier.Parcel{
+		Text: carrier.UTF8String(text),
 	}
 
 	want := d.applyWithOptions(base, d.Options())
 
 	ctx := context.Background()
-	in := make(chan textual.Parcel, 1)
+	in := make(chan carrier.Parcel, 1)
 	in <- base
 	close(in)
 

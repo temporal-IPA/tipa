@@ -5,7 +5,7 @@ import (
 	"sort"
 	"unicode"
 
-	"github.com/benoit-pereira-da-silva/textual/pkg/textual"
+	"github.com/benoit-pereira-da-silva/textual/pkg/carrier"
 	"github.com/temporal-IPA/tipa/pkg/phono"
 	"golang.org/x/text/unicode/norm"
 )
@@ -25,7 +25,7 @@ type DeterministOptions struct {
 //
 // It implements textual.Processor and can therefore be used directly in
 // textual.Chain, Router, IOReaderProcessor, Transformation, etc.
-type Determinist[S textual.Parcel] struct {
+type Determinist[S carrier.Parcel] struct {
 	// langDict is the main phonetic dictionary for the processor.
 	langDict phono.Dictionary
 	// langDictNormKeyMap maps normalized surface forms to the original
@@ -57,13 +57,13 @@ var DefaultDeterministOptions = DeterministOptions{
 
 // NewDeterminist creates a new Determinist with the given dictionary
 // and DefaultDeterministOptions (strict mode).
-func NewDeterminist[S textual.Parcel](langDict phono.Dictionary) *Determinist[S] {
+func NewDeterminist[S carrier.Parcel](langDict phono.Dictionary) *Determinist[S] {
 	return NewDeterministWithOptions[S](langDict, DefaultDeterministOptions)
 }
 
 // NewDeterministWithOptions creates a Determinist bound to langDict and
 // configured with the provided options.
-func NewDeterministWithOptions[S textual.Parcel](langDict phono.Dictionary, opts DeterministOptions) *Determinist[S] {
+func NewDeterministWithOptions[S carrier.Parcel](langDict phono.Dictionary, opts DeterministOptions) *Determinist[S] {
 	langNorm := langDict.NormalizedKeys()
 	d := &Determinist[S]{
 		langDict:           langDict,
@@ -119,12 +119,12 @@ func (d *Determinist[S]) SetDelimiters(delims []rune) {
 //
 // Raw texts are not recomputed here; callers can obtain them on demand
 // via Parcel.RawTexts().
-func (d *Determinist[S]) Apply(ctx context.Context, in <-chan textual.Parcel) <-chan textual.Parcel {
+func (d *Determinist[S]) Apply(ctx context.Context, in <-chan carrier.Parcel) <-chan carrier.Parcel {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	out := make(chan textual.Parcel)
+	out := make(chan carrier.Parcel)
 
 	go func() {
 		defer close(out)
@@ -162,7 +162,7 @@ func (d *Determinist[S]) Apply(ctx context.Context, in <-chan textual.Parcel) <-
 // It processes all RawTexts of the input Parcel independently, using
 // the same dictionary and options, then merges the newly discovered
 // fragments and recomputes raw spans via Parcel.RawTexts().
-func (d *Determinist[S]) applyWithOptions(input textual.Parcel, opts DeterministOptions) textual.Parcel {
+func (d *Determinist[S]) applyWithOptions(input carrier.Parcel, opts DeterministOptions) carrier.Parcel {
 	if len(input.Text) == 0 {
 		return input
 	}
@@ -176,10 +176,10 @@ func (d *Determinist[S]) applyWithOptions(input textual.Parcel, opts Determinist
 	out := input
 
 	// Start from existing fragments.
-	out.Fragments = make([]textual.Fragment, len(input.Fragments))
+	out.Fragments = make([]carrier.Fragment, len(input.Fragments))
 	copy(out.Fragments, input.Fragments)
 
-	newRawTexts := make([]textual.RawText, 0, len(rawTexts))
+	newRawTexts := make([]carrier.RawText, 0, len(rawTexts))
 
 	for _, raw := range rawTexts {
 		frag, leftover := d.scan(raw.Text, opts, string(input.Text), raw.Pos)
@@ -208,11 +208,11 @@ func (d *Determinist[S]) applyWithOptions(input textual.Parcel, opts Determinist
 // Positions in the returned fragments and raw spans are rune offsets
 // relative to the beginning of the original text (using offset).
 func (d *Determinist[S]) scan(
-	text textual.UTF8String,
+	text carrier.UTF8String,
 	opts DeterministOptions,
 	line string,
 	offset int,
-) ([]textual.Fragment, []textual.RawText) {
+) ([]carrier.Fragment, []carrier.RawText) {
 	// Strict pass (lowercase).
 	fragments, rawTexts := d.scanSegment(
 		text,
@@ -233,9 +233,9 @@ func (d *Determinist[S]) scan(
 	}
 
 	// Tolerant pass (diacritic‑insensitive) on the remaining RawText spans.
-	tolerantFragments := make([]textual.Fragment, 0, len(fragments))
+	tolerantFragments := make([]carrier.Fragment, 0, len(fragments))
 	tolerantFragments = append(tolerantFragments, fragments...)
-	tolerantRawTexts := make([]textual.RawText, 0, len(rawTexts))
+	tolerantRawTexts := make([]carrier.RawText, 0, len(rawTexts))
 
 	for _, rt := range rawTexts {
 		segFrags, segRaws := d.scanSegment(
@@ -270,7 +270,7 @@ func (d *Determinist[S]) scan(
 // The offset parameter indicates the rune position of the first rune of
 // text within the original input string.
 func (d *Determinist[S]) scanSegment(
-	text textual.UTF8String,
+	text carrier.UTF8String,
 	offset int,
 	dictionary phono.Dictionary,
 	normalized phono.KeyMap,
@@ -279,12 +279,12 @@ func (d *Determinist[S]) scanSegment(
 	passConfidence float64,
 	line string,
 	opts DeterministOptions,
-) ([]textual.Fragment, []textual.RawText) {
+) ([]carrier.Fragment, []carrier.RawText) {
 	runes := []rune(text)
 	n := len(runes)
 
-	fragments := make([]textual.Fragment, 0)
-	rawTexts := make([]textual.RawText, 0)
+	fragments := make([]carrier.Fragment, 0)
+	rawTexts := make([]carrier.RawText, 0)
 
 	if n == 0 {
 		return fragments, rawTexts
@@ -293,7 +293,7 @@ func (d *Determinist[S]) scanSegment(
 	// If the dictionary is empty or has no usable keys, the whole segment
 	// is raw.
 	if maxKeyLen <= 0 || len(normalized) == 0 || len(dictionary) == 0 {
-		rawTexts = append(rawTexts, textual.RawText{
+		rawTexts = append(rawTexts, carrier.RawText{
 			Text: text,
 			Pos:  offset,
 			Len:  n,
@@ -349,8 +349,8 @@ func (d *Determinist[S]) scanSegment(
 
 			// Flush any pending raw text before emitting fragments.
 			if currentRawStart != -1 && currentRawStart < i {
-				rawTexts = append(rawTexts, textual.RawText{
-					Text: textual.UTF8String(runes[currentRawStart:i]),
+				rawTexts = append(rawTexts, carrier.RawText{
+					Text: carrier.UTF8String(runes[currentRawStart:i]),
 					Pos:  offset + currentRawStart,
 					Len:  i - currentRawStart,
 				})
@@ -358,7 +358,7 @@ func (d *Determinist[S]) scanSegment(
 			}
 
 			for variantIndex, opt := range options {
-				fragments = append(fragments, textual.Fragment{
+				fragments = append(fragments, carrier.Fragment{
 					Transformed: opt.S,
 					Pos:         offset + i,
 					Len:         l,
@@ -382,8 +382,8 @@ func (d *Determinist[S]) scanSegment(
 
 	// Flush trailing raw text, if any.
 	if currentRawStart != -1 && currentRawStart < n {
-		rawTexts = append(rawTexts, textual.RawText{
-			Text: textual.UTF8String(runes[currentRawStart:n]),
+		rawTexts = append(rawTexts, carrier.RawText{
+			Text: carrier.UTF8String(runes[currentRawStart:n]),
 			Pos:  offset + currentRawStart,
 			Len:  n - currentRawStart,
 		})
@@ -463,7 +463,7 @@ func removeDiacritics(s string) string {
 
 // sortFragments orders fragments by position and span length, and, for
 // identical spans, by decreasing confidence then increasing variant.
-func sortFragments(frags []textual.Fragment) {
+func sortFragments(frags []carrier.Fragment) {
 	if len(frags) < 2 {
 		return
 	}
