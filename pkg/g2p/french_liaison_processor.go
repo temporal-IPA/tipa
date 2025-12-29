@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/benoit-pereira-da-silva/textual/pkg/carrier"
+	"github.com/benoit-pereira-da-silva/textual/pkg/textual"
 )
 
 // FrenchLiaison applies simple French liaison heuristics on top of a
@@ -98,42 +99,9 @@ func newFrenchLiaison[S carrier.Parcel](allowLoose bool) *FrenchLiaison[S] {
 // sequence and inserts liaison consonants into Fragment.Transformed when
 // appropriate. The original text and fragment coordinates are preserved.
 func (p *FrenchLiaison[S]) Apply(ctx context.Context, in <-chan carrier.Parcel) <-chan carrier.Parcel {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	out := make(chan carrier.Parcel)
-
-	go func() {
-		defer close(out)
-
-		for {
-			select {
-			case <-ctx.Done():
-				// Stop emitting results but drain upstream to avoid
-				// blocking senders.
-				for range in {
-				}
-				return
-			case res, ok := <-in:
-				if !ok {
-					// Upstream closed: no more input.
-					return
-				}
-
-				processed := p.processResult(res)
-
-				select {
-				case <-ctx.Done():
-					// Context canceled while sending.
-					return
-				case out <- processed:
-				}
-			}
-		}
-	}()
-
-	return out
+	return textual.Async(ctx, in, func(ctx context.Context, t carrier.Parcel) carrier.Parcel {
+		return p.processResult(t)
+	})
 }
 
 // --- tokens and helpers ---

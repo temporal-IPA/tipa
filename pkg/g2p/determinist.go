@@ -6,6 +6,7 @@ import (
 	"unicode"
 
 	"github.com/benoit-pereira-da-silva/textual/pkg/carrier"
+	"github.com/benoit-pereira-da-silva/textual/pkg/textual"
 	"github.com/temporal-IPA/tipa/pkg/phono"
 	"golang.org/x/text/unicode/norm"
 )
@@ -120,41 +121,9 @@ func (d *Determinist[S]) SetDelimiters(delims []rune) {
 // Raw texts are not recomputed here; callers can obtain them on demand
 // via Parcel.RawTexts().
 func (d *Determinist[S]) Apply(ctx context.Context, in <-chan carrier.Parcel) <-chan carrier.Parcel {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	out := make(chan carrier.Parcel)
-
-	go func() {
-		defer close(out)
-
-		for {
-			select {
-			case <-ctx.Done():
-				// Drain the input channel to avoid blocking upstream
-				// senders, but stop forwarding results.
-				for range in {
-				}
-				return
-			case res, ok := <-in:
-				if !ok {
-					return
-				}
-
-				processed := d.applyWithOptions(res, d.options)
-
-				select {
-				case <-ctx.Done():
-					// Context canceled while trying to send.
-					return
-				case out <- processed:
-				}
-			}
-		}
-	}()
-
-	return out
+	return textual.Async(ctx, in, func(ctx context.Context, t carrier.Parcel) carrier.Parcel {
+		return d.applyWithOptions(t, d.options)
+	})
 }
 
 // applyWithOptions is the internal implementation used by Apply.
